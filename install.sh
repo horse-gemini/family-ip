@@ -91,6 +91,8 @@ else
     if [ -d "${INSTALL_DIR}" ]; then
         echo -e "  -> 目录 ${INSTALL_DIR} 已存在，正在更新并强制覆盖本地源码..."
         cd "${INSTALL_DIR}"
+        echo -e "  -> 正在将 origin 远程地址指向 ${GITHUB_URL} ..."
+        git remote set-url origin "${GITHUB_URL}" 2>/dev/null || git remote add origin "${GITHUB_URL}"
         git fetch origin "${DEPLOY_BRANCH}" || true
         git checkout -B "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}" || true
         echo -e "  -> 正在强制重置本地源码至 origin/${DEPLOY_BRANCH} ..."
@@ -184,6 +186,7 @@ import shutil
 
 INSTALL_DIR = "/opt/aimilivpn"
 LOG_FILE = "/opt/aimilivpn/vpngate_data/vpngate.log"
+GITHUB_URL = "https://github.com/yzl-job/aimili-vpngate-public.git"
 
 def generate_random_password():
     import secrets
@@ -532,6 +535,17 @@ def update_service():
                 return
             
             branch = "main"
+            # 将 origin 指向当前配置的仓库，确保旧安装也切换到正确的更新源
+            if subprocess.run(
+                ["git", "remote", "set-url", "origin", GITHUB_URL],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode != 0:
+                subprocess.run(
+                    ["git", "remote", "add", "origin", GITHUB_URL],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             subprocess.run(
                 ["git", "fetch", "origin", branch],
                 check=True,
