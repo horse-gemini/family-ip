@@ -409,6 +409,38 @@ class ManagerLogicTests(unittest.TestCase):
             [node["id"] for node in ordered],
         )
 
+    def test_us_residential_priority_flags_only_us_home_ip(self) -> None:
+        us_home = manager.us_residential_priority(
+            {"country_short": "us", "ip_type": "Residential"}
+        )
+        us_hosting = manager.us_residential_priority(
+            {"country_short": "US", "ip_type": "hosting"}
+        )
+        jp_home = manager.us_residential_priority(
+            {"country_short": "JP", "ip_type": "residential"}
+        )
+
+        self.assertEqual(us_home, 0)
+        self.assertEqual(us_hosting, 1)
+        self.assertEqual(jp_home, 1)
+
+    def test_us_residential_node_wins_over_lower_risk_but_non_us_node(self) -> None:
+        nodes = [
+            # Lowest risk-control index overall, but not a US residential IP.
+            {"id": "jp-mobile", "probe_status": "available", "country_short": "JP",
+             "ip_type": "mobile", "latency_ms": 10, "score": 500},
+            # US residential but slower/riskier — must still come first.
+            {"id": "us-residential", "probe_status": "available", "country_short": "US",
+             "ip_type": "residential", "latency_ms": 300, "score": 100},
+        ]
+
+        ordered = manager.sort_all_nodes(nodes)
+
+        self.assertEqual(
+            ["us-residential", "jp-mobile"],
+            [node["id"] for node in ordered],
+        )
+
     def test_background_ip_enrichment_merges_metadata_without_replacing_status(self) -> None:
         nodes = self.write_nodes(2)
         nodes[0]["probe_status"] = "available"
