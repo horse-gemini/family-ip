@@ -1619,11 +1619,35 @@ def connection_ready_for_ui(state: dict[str, Any] | None = None) -> bool:
         and not current.get("is_connecting")
     )
 
+# 风控指数：数值越低，出口 IP 越不容易被网站风控/反欺诈系统识别拦截，
+# 因而在自动选择时应优先。移动网络与住宅网络看起来更像普通用户流量，
+# 机房（hosting）出口最容易被判定为 VPN/代理，风控指数最高。
+RISK_CONTROL_IP_TYPE_SCORES = {
+    "mobile": 0,
+    "residential": 1,
+    "unknown": 2,
+    "": 2,
+    "hosting": 3,
+}
+
+
+def risk_control_index(node: dict[str, Any]) -> int:
+    """返回节点的风控指数，数值越低代表越不易被风控，越应优先选择。
+
+    以 IP 网络类型为主：移动 < 住宅 < 未知 < 机房；对已被标记为公开
+    代理/VPN 的 IP 再叠加惩罚，因为这类 IP 更容易被目标网站拦截。
+    """
+    ip_type = str(node.get("ip_type") or "").strip().lower()
+    base = RISK_CONTROL_IP_TYPE_SCORES.get(ip_type, 2)
+    proxy_penalty = 1 if node.get("is_proxy") else 0
+    return base * 2 + proxy_penalty
+
+
 def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     available_nodes = sorted(
         [n for n in nodes if n.get("probe_status") == "available" or n.get("active")],
         key=lambda n: (
-            0 if n.get("ip_type") in ("residential", "mobile") else 1,
+            risk_control_index(n),
             parse_int(n.get("latency_ms")) or 999999,
             -parse_int(n.get("score"))
         )
@@ -2157,8 +2181,12 @@ def auto_switch_node(attempt: int = 0) -> None:
         ]
         candidates = apply_routing_filters(candidates, ui_cfg)
             
-        candidates.sort(key=lambda n: (parse_int(n.get("latency_ms")) or 999999, -parse_int(n.get("score"))))
-        
+        candidates.sort(key=lambda n: (
+            risk_control_index(n),
+            parse_int(n.get("latency_ms")) or 999999,
+            -parse_int(n.get("score")),
+        ))
+
     if candidates:
         next_node = candidates[0]
         msg = f"当前连接已失效或代理连通性检测失败，正在自动切换至最佳备用节点: {next_node['id']}"

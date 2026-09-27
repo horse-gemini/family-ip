@@ -371,6 +371,44 @@ class ManagerLogicTests(unittest.TestCase):
 
         self.assertEqual(["medium", "mobile"], [node["id"] for node in strict])
 
+    def test_risk_control_index_orders_ip_types_from_safe_to_risky(self) -> None:
+        mobile = manager.risk_control_index({"ip_type": "mobile"})
+        residential = manager.risk_control_index({"ip_type": "residential"})
+        unknown = manager.risk_control_index({"ip_type": "unknown"})
+        empty = manager.risk_control_index({"ip_type": ""})
+        hosting = manager.risk_control_index({"ip_type": "hosting"})
+
+        self.assertLess(mobile, residential)
+        self.assertLess(residential, unknown)
+        self.assertEqual(unknown, empty)
+        self.assertLess(unknown, hosting)
+
+        # A network flagged as a public proxy is riskier than the same type
+        # without the flag, but still ordered by its underlying network type.
+        residential_proxy = manager.risk_control_index(
+            {"ip_type": "residential", "is_proxy": True}
+        )
+        self.assertGreater(residential_proxy, residential)
+        self.assertLess(residential_proxy, hosting)
+
+    def test_available_nodes_sorted_by_lowest_risk_control_index_first(self) -> None:
+        nodes = [
+            {"id": "hosting-fast", "probe_status": "available", "ip_type": "hosting",
+             "latency_ms": 10, "score": 500},
+            {"id": "residential-slow", "probe_status": "available", "ip_type": "residential",
+             "latency_ms": 300, "score": 100},
+            {"id": "mobile-mid", "probe_status": "available", "ip_type": "mobile",
+             "latency_ms": 150, "score": 100},
+        ]
+
+        ordered = manager.sort_all_nodes(nodes)
+
+        # Lowest risk-control index wins even when a riskier node is faster.
+        self.assertEqual(
+            ["mobile-mid", "residential-slow", "hosting-fast"],
+            [node["id"] for node in ordered],
+        )
+
     def test_background_ip_enrichment_merges_metadata_without_replacing_status(self) -> None:
         nodes = self.write_nodes(2)
         nodes[0]["probe_status"] = "available"
