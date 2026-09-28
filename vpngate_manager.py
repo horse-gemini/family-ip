@@ -202,6 +202,11 @@ IP_ENRICHMENT_FIELDS = (
     "ip_type_confidence",
     "ip_type_sources",
     "geo_country_short",
+    "is_vpn",
+    "is_tor",
+    "is_abuser",
+    "abuser_score",
+    "risk_control_index",
 )
 
 class ConnectionCancelled(RuntimeError):
@@ -1619,28 +1624,16 @@ def connection_ready_for_ui(state: dict[str, Any] | None = None) -> bool:
         and not current.get("is_connecting")
     )
 
-# 风控指数：数值越低，出口 IP 越不容易被网站风控/反欺诈系统识别拦截，
-# 因而在自动选择时应优先。移动网络与住宅网络看起来更像普通用户流量，
-# 机房（hosting）出口最容易被判定为 VPN/代理，风控指数最高。
-RISK_CONTROL_IP_TYPE_SCORES = {
-    "mobile": 0,
-    "residential": 1,
-    "unknown": 2,
-    "": 2,
-    "hosting": 3,
-}
-
-
 def risk_control_index(node: dict[str, Any]) -> int:
     """返回节点的风控指数，数值越低代表越不易被风控，越应优先选择。
 
-    以 IP 网络类型为主：移动 < 住宅 < 未知 < 机房；对已被标记为公开
-    代理/VPN 的 IP 再叠加惩罚，因为这类 IP 更容易被目标网站拦截。
+    风控指数由 ip-api.com 与 ipapi.is 的合并信号在 IP 富化阶段计算得出
+    （见 vpn_utils.compute_risk_control_index）：以网络类型为基准（移动 <
+    住宅 < 未知 < 机房），再叠加代理 / VPN / Tor / 已知滥用 IP 以及 ipapi.is
+    滥用信誉分的惩罚。这里直接依据节点上的合并信号重新计算，保证排序与
+    富化结果口径一致，并可作用于尚未富化（仅有 ip_type）的节点。
     """
-    ip_type = str(node.get("ip_type") or "").strip().lower()
-    base = RISK_CONTROL_IP_TYPE_SCORES.get(ip_type, 2)
-    proxy_penalty = 1 if node.get("is_proxy") else 0
-    return base * 2 + proxy_penalty
+    return vpn_utils.compute_risk_control_index(node)
 
 
 def us_residential_priority(node: dict[str, Any]) -> int:

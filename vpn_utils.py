@@ -16,7 +16,7 @@ from typing import Any
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ["VPNGATE_DATA_DIR"]).resolve() if os.environ.get("VPNGATE_DATA_DIR") else ROOT_DIR / "vpngate_data"
 IP_CACHE_FILE = DATA_DIR / "ip_cache.json"
-IP_CLASSIFICATION_VERSION = 4
+IP_CLASSIFICATION_VERSION = 5
 IP_CACHE_TTL_SECONDS = 7 * 24 * 3600
 
 ip_cache_lock = threading.RLock()
@@ -428,6 +428,82 @@ def classification_confidence(reason: str) -> str:
         return "medium"
     return "low"
 
+# 风控指数：数值越低，出口 IP 越干净、越不容易被网站风控/反欺诈系统识别拦截，
+# 因而在自动选择时应优先。以出口 IP 的网络类型为基准（移动 < 住宅 < 未知 < 机房），
+# 再叠加 ip-api.com 与 ipapi.is 的“不干净”信号（代理 / VPN / Tor / 已知滥用 IP、
+# 以及 ipapi.is 的滥用信誉分 abuser_score）作为惩罚。
+RISK_CONTROL_IP_TYPE_SCORES = {
+    "mobile": 0,
+    "residential": 1,
+    "unknown": 2,
+    "": 2,
+    "hosting": 3,
+}
+
+
+def parse_abuser_score(value: Any) -> float:
+    """将 ipapi.is 的 abuser_score 解析为 [0.0, 1.0] 的浮点数。
+
+    ipapi.is 可能返回纯数值，也可能返回形如 "0.0007 (Very Low)" 的字符串，
+    这里统一取其中的数值部分，无法解析时按 0（最干净）处理。
+    """
+    if value is None or isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        score = float(value)
+    else:
+        match = re.search(r"[-+]?\d*\.?\d+", str(value))
+        if not match:
+            return 0.0
+        try:
+            score = float(match.group())
+        except ValueError:
+            return 0.0
+    return max(0.0, min(1.0, score))
+
+
+def compute_risk_control_index(info: dict[str, Any]) -> int:
+    """依据 ip-api.com 与 ipapi.is 的合并信号计算风控指数，越低越应优先。
+
+    先以网络类型给出基准分（移动 < 住宅 < 未知 < 机房），再叠加“不干净”
+    信号的惩罚：Tor 出口最重，其次已知滥用 IP、公开 VPN、代理，最后按
+    ipapi.is 的滥用信誉分（abuser_score）连续加权。
+    """
+    ip_type = str(info.get("ip_type") or "").strip().lower()
+    base = RISK_CONTROL_IP_TYPE_SCORES.get(ip_type, 2)
+    index = base * 10
+    if info.get("is_tor"):
+        index += 8
+    if info.get("is_abuser"):
+        index += 6
+    if info.get("is_vpn"):
+        index += 4
+    if info.get("is_proxy"):
+        index += 3
+    index += int(round(parse_abuser_score(info.get("abuser_score")) * 5))
+    return index
+
+
+def extract_ipapi_is_signals(payload: dict[str, Any]) -> dict[str, Any]:
+    """从 ipapi.is 响应中提取网络类型与“干净程度”信号。"""
+    company = payload.get("company") if isinstance(payload.get("company"), dict) else {}
+    asn = payload.get("asn") if isinstance(payload.get("asn"), dict) else {}
+    abuser_score = max(
+        parse_abuser_score(payload.get("abuser_score")),
+        parse_abuser_score(company.get("abuser_score")),
+        parse_abuser_score(asn.get("abuser_score")),
+    )
+    return {
+        "is_datacenter": bool(payload.get("is_datacenter")),
+        "is_vpn": bool(payload.get("is_vpn")),
+        "is_proxy": bool(payload.get("is_proxy")),
+        "is_tor": bool(payload.get("is_tor")),
+        "is_abuser": bool(payload.get("is_abuser")),
+        "is_mobile": bool(payload.get("is_mobile")),
+        "abuser_score": round(abuser_score, 6),
+    }
+
+
 def query_secondary_ip_type(ip: str) -> dict[str, Any] | None:
     request = urllib.request.Request(
         f"https://api.ipapi.is/?q={urllib.parse.quote(ip)}",
@@ -439,7 +515,10 @@ def query_secondary_ip_type(ip: str) -> dict[str, Any] | None:
         if (
             not isinstance(payload, dict)
             or payload.get("error")
-            or not any(key in payload for key in ("is_datacenter", "is_mobile"))
+            or not any(
+                key in payload
+                for key in ("is_datacenter", "is_mobile", "is_vpn", "is_proxy", "is_tor", "is_abuser")
+            )
         ):
             return None
         return payload
@@ -462,6 +541,11 @@ def apply_ip_cache_entry(node: dict[str, Any], entry: dict[str, Any]) -> None:
         "ip_type_confidence",
         "ip_type_sources",
         "geo_country_short",
+        "is_vpn",
+        "is_tor",
+        "is_abuser",
+        "abuser_score",
+        "risk_control_index",
     ):
         node[key] = entry.get(key, "")
 
@@ -544,6 +628,10 @@ def enrich_ip_info(nodes: list[dict[str, Any]]) -> None:
                         "is_proxy": bool(item.get("proxy")),
                         "is_hosting": bool(item.get("hosting")),
                         "is_mobile": bool(item.get("mobile")),
+                        "is_vpn": False,
+                        "is_tor": False,
+                        "is_abuser": False,
+                        "abuser_score": 0.0,
                         "ip_type_reason": ip_type_reason,
                         "ip_type_confidence": classification_confidence(ip_type_reason),
                         "ip_type_sources": ["ip-api.com"],
@@ -553,26 +641,35 @@ def enrich_ip_info(nodes: list[dict[str, Any]]) -> None:
         except Exception as e:
             print(f"[enrich_ip_info] Query failed: {e}", flush=True)
 
-    ambiguous_ips = [
-        ip
-        for ip, entry in new_entries.items()
-        if entry.get("ip_type_reason") in {"proxy_provider_datacenter", "missing_provider_data"}
-    ]
-    if ambiguous_ips:
-        max_workers = min(4, len(ambiguous_ips))
+    # 用 ipapi.is 补充每一个新分类的 IP：既用于修正网络类型，也用于采集
+    # 代理 / VPN / Tor / 滥用信誉等“干净程度”信号，最后据此计算风控指数。
+    if new_entries:
+        all_ips = list(new_entries.keys())
+        secondary_results: dict[str, dict[str, Any] | None] = {}
+        max_workers = min(8, len(all_ips))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
                 executor.submit(query_secondary_ip_type, ip): ip
-                for ip in ambiguous_ips
+                for ip in all_ips
             }
             for future in concurrent.futures.as_completed(future_map):
                 ip = future_map[future]
                 try:
-                    secondary = future.result()
+                    secondary_results[ip] = future.result()
                 except Exception:
-                    secondary = None
-                entry = new_entries[ip]
-                if secondary is None:
+                    secondary_results[ip] = None
+
+        for ip, entry in new_entries.items():
+            ambiguous = entry.get("ip_type_reason") in {
+                "proxy_provider_datacenter",
+                "missing_provider_data",
+            }
+            secondary = secondary_results.get(ip)
+
+            if secondary is None:
+                # ipapi.is 不可用：无法核实的模糊类型退回“未知”，其余保留
+                # ip-api.com 的判定，并仅依据 ip-api.com 的信号计算风控指数。
+                if ambiguous:
                     entry["ip_type"] = "unknown"
                     entry["ip_type_reason"] = (
                         "provider_data_unverified"
@@ -580,14 +677,27 @@ def enrich_ip_info(nodes: list[dict[str, Any]]) -> None:
                         else "datacenter_conflict_unverified"
                     )
                     entry["ip_type_confidence"] = "low"
-                    continue
-                entry["ip_type_sources"].append("ipapi.is")
-                if secondary.get("is_mobile"):
+                entry["risk_control_index"] = compute_risk_control_index(entry)
+                continue
+
+            signals = extract_ipapi_is_signals(secondary)
+            entry["ip_type_sources"].append("ipapi.is")
+
+            # 合并“干净程度”信号：任一情报源判定为代理/VPN 均视为代理。
+            entry["is_vpn"] = signals["is_vpn"]
+            entry["is_tor"] = signals["is_tor"]
+            entry["is_abuser"] = signals["is_abuser"]
+            entry["abuser_score"] = signals["abuser_score"]
+            entry["is_proxy"] = bool(entry.get("is_proxy")) or signals["is_proxy"] or signals["is_vpn"]
+
+            if ambiguous:
+                # ip-api.com 无法定性的 IP，以 ipapi.is 的类型判定为准。
+                if signals["is_mobile"]:
                     entry["ip_type"] = "mobile"
                     entry["ip_type_reason"] = "secondary_mobile"
                     entry["quality"] = "mobile"
                     entry["is_mobile"] = True
-                elif secondary.get("is_datacenter"):
+                elif signals["is_datacenter"]:
                     entry["ip_type"] = "hosting"
                     entry["ip_type_reason"] = "secondary_datacenter"
                     entry["quality"] = "datacenter"
@@ -596,6 +706,23 @@ def enrich_ip_info(nodes: list[dict[str, Any]]) -> None:
                     entry["ip_type"] = "residential"
                     entry["ip_type_reason"] = "secondary_consumer_network"
                 entry["ip_type_confidence"] = classification_confidence(entry["ip_type_reason"])
+            else:
+                # 非模糊类型仍以 ip-api.com 为准，但当 ipapi.is 给出更强的
+                # 机房/移动信号且与主判定明显冲突时予以纠正。
+                if signals["is_datacenter"] and entry["ip_type"] == "residential":
+                    entry["ip_type"] = "hosting"
+                    entry["ip_type_reason"] = "secondary_datacenter"
+                    entry["quality"] = "datacenter"
+                    entry["is_hosting"] = True
+                    entry["ip_type_confidence"] = classification_confidence("secondary_datacenter")
+                elif signals["is_mobile"] and entry["ip_type"] != "mobile":
+                    entry["ip_type"] = "mobile"
+                    entry["ip_type_reason"] = "secondary_mobile"
+                    entry["quality"] = "mobile"
+                    entry["is_mobile"] = True
+                    entry["ip_type_confidence"] = classification_confidence("secondary_mobile")
+
+            entry["risk_control_index"] = compute_risk_control_index(entry)
 
     if not new_entries:
         return

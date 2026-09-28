@@ -229,19 +229,38 @@ class ManagerLogicTests(unittest.TestCase):
                 "mobile": False,
             }
         ]
-        response = mock.MagicMock()
-        response.read.return_value = json.dumps(api_result).encode("utf-8")
-        response.__enter__.return_value = response
+        primary = mock.MagicMock()
+        primary.read.return_value = json.dumps(api_result).encode("utf-8")
+        primary.__enter__.return_value = primary
+        # ipapi.is now supplements every classified IP with cleanliness signals.
+        secondary = mock.MagicMock()
+        secondary.read.return_value = json.dumps(
+            {
+                "is_datacenter": False,
+                "is_mobile": False,
+                "is_vpn": False,
+                "is_proxy": False,
+                "is_tor": False,
+                "is_abuser": False,
+                "company": {"abuser_score": "0.0 (Very Low)"},
+            }
+        ).encode("utf-8")
+        secondary.__enter__.return_value = secondary
         node = {"id": "sony", "ip": ip}
 
-        with mock.patch.object(manager.vpn_utils.urllib.request, "urlopen", return_value=response) as urlopen_mock:
+        with mock.patch.object(
+            manager.vpn_utils.urllib.request,
+            "urlopen",
+            side_effect=[primary, secondary],
+        ) as urlopen_mock:
             manager.vpn_utils.enrich_ip_info([node])
 
         self.assertEqual("residential", node["ip_type"])
         self.assertEqual("proxy", node["quality"])
         self.assertTrue(node["is_proxy"])
         self.assertFalse(node["is_hosting"])
-        urlopen_mock.assert_called_once()
+        self.assertEqual(["ip-api.com", "ipapi.is"], node["ip_type_sources"])
+        self.assertEqual(2, urlopen_mock.call_count)
         cache = json.loads(manager.vpn_utils.IP_CACHE_FILE.read_text(encoding="utf-8"))
         self.assertEqual(manager.vpn_utils.IP_CLASSIFICATION_VERSION, cache[ip]["classification_version"])
 
@@ -390,6 +409,77 @@ class ManagerLogicTests(unittest.TestCase):
         )
         self.assertGreater(residential_proxy, residential)
         self.assertLess(residential_proxy, hosting)
+
+    def test_risk_control_index_penalizes_unclean_ip_signals(self) -> None:
+        clean = manager.risk_control_index({"ip_type": "residential"})
+        proxy = manager.risk_control_index({"ip_type": "residential", "is_proxy": True})
+        vpn = manager.risk_control_index({"ip_type": "residential", "is_vpn": True})
+        abuser = manager.risk_control_index({"ip_type": "residential", "is_abuser": True})
+        tor = manager.risk_control_index({"ip_type": "residential", "is_tor": True})
+        reputation = manager.risk_control_index(
+            {"ip_type": "residential", "abuser_score": "1.0 (Very High)"}
+        )
+
+        # Every "dirty" signal makes a residential IP riskier than a clean one.
+        self.assertLess(clean, proxy)
+        self.assertLess(proxy, vpn)
+        self.assertLess(vpn, abuser)
+        self.assertLess(abuser, tor)
+        # The continuous abuser reputation from ipapi.is also raises the index.
+        self.assertGreater(reputation, clean)
+
+    def test_enrich_supplements_every_ip_with_ipapi_is_cleanliness(self) -> None:
+        ip = "198.51.100.7"
+        primary_payload = [{
+            "status": "success",
+            "query": ip,
+            "country": "United States",
+            "countryCode": "US",
+            "regionName": "California",
+            "city": "Los Angeles",
+            "isp": "Comcast Cable",
+            "org": "Comcast Cable Communications",
+            "as": "AS7922 Comcast",
+            "asname": "COMCAST",
+            "proxy": False,
+            "hosting": False,
+            "mobile": False,
+        }]
+        primary = mock.MagicMock()
+        primary.read.return_value = json.dumps(primary_payload).encode("utf-8")
+        primary.__enter__.return_value = primary
+        # ip-api.com sees a clean residential IP, but ipapi.is flags it as a
+        # public VPN / known abuser — the risk index must reflect that.
+        secondary = mock.MagicMock()
+        secondary.read.return_value = json.dumps(
+            {
+                "is_datacenter": False,
+                "is_mobile": False,
+                "is_vpn": True,
+                "is_proxy": False,
+                "is_tor": False,
+                "is_abuser": True,
+                "company": {"abuser_score": "0.85 (High)"},
+            }
+        ).encode("utf-8")
+        secondary.__enter__.return_value = secondary
+        node = {"id": "us-home", "ip": ip}
+
+        with mock.patch.object(
+            manager.vpn_utils.urllib.request,
+            "urlopen",
+            side_effect=[primary, secondary],
+        ):
+            manager.vpn_utils.enrich_ip_info([node])
+
+        self.assertEqual("residential", node["ip_type"])
+        self.assertTrue(node["is_vpn"])
+        self.assertTrue(node["is_abuser"])
+        self.assertTrue(node["is_proxy"])  # VPN flag implies proxy-like exit
+        self.assertEqual(["ip-api.com", "ipapi.is"], node["ip_type_sources"])
+        clean_home = manager.risk_control_index({"ip_type": "residential"})
+        self.assertEqual(node["risk_control_index"], manager.risk_control_index(node))
+        self.assertGreater(node["risk_control_index"], clean_home)
 
     def test_available_nodes_sorted_by_lowest_risk_control_index_first(self) -> None:
         nodes = [
