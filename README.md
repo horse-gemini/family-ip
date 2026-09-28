@@ -10,13 +10,30 @@
 
 **简体中文** · [English](docs/README.en.md) · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md)
 
-[快速安装](#quick-install) · [完整安装](#installation) · [连接使用](#connection) · [服务商推荐](#vps) · [社区入口](#community) · [法律声明](#legal)
+[核心特性](#features) · [快速安装](#quick-install) · [完整安装](#installation) · [连接使用](#connection) · [服务商推荐](#vps) · [社区入口](#community) · [法律声明](#legal)
 
 [![项目网站](https://img.shields.io/badge/项目网站-339936.xyz-f97316?style=for-the-badge)](https://339936.xyz)
 [![Telegram](https://img.shields.io/badge/Telegram-交流群-229ED9?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/arestemple)
 [![YouTube](https://img.shields.io/badge/YouTube-视频教程-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=s-ATfXR8BpI)
 
 </div>
+
+<a id="features"></a>
+
+## 核心特性
+
+- **一键部署，多协议网关：** 面向 Linux VPS 的一键源码 / Docker Compose 安装，自动管理 VPNGate 节点，并对外提供 HTTP / HTTPS / SOCKS5 代理。
+- **Web 后台管理：** 浏览器登录后即可更新节点、按国家筛选、实测延迟、一键切换，并支持智能自动、固定国家、固定 IP 三种连接模式。
+- **智能节点选择（按优先级）：** 自动连接与故障自动切换会依次按以下规则挑选最优节点——
+
+  1. **🇺🇸 最高优先：美国家庭（住宅）IP 节点。** 只要存在美国（US）住宅 IP 的可用节点，就优先选择，其权重高于风控指数、延迟与评分。
+  2. **🛡️ 综合风控指数（越低越优先）。** 先用 [ip-api.com](http://ip-api.com/) 查询网络类型与地理位置（移动 < 住宅 < 未知 < 机房），再用 [ipapi.is](https://ipapi.is/) 逐一补充“干净程度”情报（代理 / 公开 VPN / Tor 出口、已知滥用 IP、滥用信誉分 abuser_score），据此叠加惩罚算出综合风控指数；ipapi.is 不可用时自动退回仅依据 ip-api.com 判定。
+  3. **⚡ 实测延迟与评分。** 在同等风控水平内，再比较本机实测延迟与节点评分。
+
+- **俄罗斯节点自动过滤：** 依据 IP 归属地识别物理位置，判定为俄罗斯的节点自动标记为不可用，不会被智能自动 / 快速连接 / 周期检测选中（列表中仍保留地理信息以便查看）。
+- **故障自动切换：** 当前连接失效或代理连通性检测失败时，按上述规则自动切换至最佳备用节点。
+
+> 详细说明见下文 [连接与使用](#connection) 章节的对应提示。
 
 <a id="vps"></a>
 
