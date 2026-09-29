@@ -214,7 +214,7 @@ def get_app_version():
 def load_ui_cfg():
     import json
     path = "/opt/family-ip/vpngate_data/ui_auth.json"
-    cfg = {"host": "::", "port": 8787, "secret_path": "EJsW2EeBo9lY", "password": ""}
+    cfg = {"host": "127.0.0.1", "port": 8787, "secret_path": "EJsW2EeBo9lY", "password": ""}
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -428,7 +428,7 @@ def print_status():
     print_line(format_line(f"管理后台 (Port {ui_port})", backend_status))
     print_line(format_line("连接核心 (OpenVPN)", openvpn_status))
     
-    host_cfg = cfg.get("host", "::")
+    host_cfg = cfg.get("host", "127.0.0.1")
     if host_cfg in ("127.0.0.1", "localhost"):
         login_ip = "127.0.0.1"
     elif host_cfg == "::1":
@@ -650,7 +650,7 @@ def configure_web():
         print("=======================================================")
         print("               网页绑定与地址后缀配置                  ")
         print("=======================================================")
-        print(f"  [1] 切换绑定地址 (当前: {cfg.get('host', '0.0.0.0')})")
+        print(f"  [1] 切换绑定地址 (当前: {cfg.get('host', '127.0.0.1')})")
         print(f"  [2] 随机重置安全后缀 (当前: {cfg.get('secret_path', '')})")
         print("  [3] 返回主菜单")
         print("=======================================================")
@@ -660,19 +660,20 @@ def configure_web():
         if key == '1':
             print("\033[H\033[J", end="")
             print("选择网页登录绑定地址：")
-            print("  1. 仅允许本地 IPv4 登录 (127.0.0.1 - 更安全)")
-            print("  2. 允许 IPv4 公网登录 (0.0.0.0)")
-            print("  3. 允许 IPv4 & IPv6 双栈公网登录 (:: - 推荐)")
+            print("  1. 仅允许本地 IPv4 登录 (127.0.0.1 - 推荐，最安全)")
+            print("  2. 允许 IPv4 公网登录 (0.0.0.0 - 有暴露风险)")
+            print("  3. 允许 IPv4 & IPv6 双栈公网登录 (:: - 有暴露风险)")
             print("  4. 仅允许本地 IPv6 登录 (::1)")
-            sel = input("请选择 (1/2/3/4, 默认3): ").strip()
-            if sel == '1':
-                cfg['host'] = "127.0.0.1"
-            elif sel == '2':
+            print("  提示：公网监听存在安全风险，如需远程访问建议使用 SSH 隧道。")
+            sel = input("请选择 (1/2/3/4, 默认1): ").strip()
+            if sel == '2':
                 cfg['host'] = "0.0.0.0"
+            elif sel == '3':
+                cfg['host'] = "::"
             elif sel == '4':
                 cfg['host'] = "::1"
             else:
-                cfg['host'] = "::"
+                cfg['host'] = "127.0.0.1"
             save_ui_cfg(cfg)
             print(f"绑定地址已更新为: {cfg['host']}")
             ask_restart()
@@ -848,7 +849,7 @@ def get_status_state():
         cfg.get("secret_path", "EJsW2EeBo9lY"),
         cfg.get("username", "未配置"),
         cfg.get("password", ""),
-        cfg.get("host", "0.0.0.0"),
+        cfg.get("host", "127.0.0.1"),
         state.get("is_connecting", False),
         state.get("active_openvpn_node_id", ""),
         state.get("last_check_message", ""),
@@ -1090,7 +1091,7 @@ import sys
 
 auth_file, ui_port, secret_path, username, password = sys.argv[1:6]
 cfg = {
-    "host": "::",
+    "host": "127.0.0.1",
     "port": int(ui_port),
     "proxy_port": 7928,
     "secret_path": secret_path,
