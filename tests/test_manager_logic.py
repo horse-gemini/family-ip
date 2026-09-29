@@ -648,6 +648,47 @@ class ManagerLogicTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(0o600, stat.S_IMODE(auth_file.stat().st_mode))
 
+    def test_ui_host_defaults_to_loopback(self) -> None:
+        auth_file = manager.DATA_DIR / "ui_auth.json"
+        auth_file.unlink(missing_ok=True)
+        try:
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("UI_HOST", None)
+                config = manager.load_ui_config()
+            self.assertEqual("127.0.0.1", config["host"])
+        finally:
+            auth_file.unlink(missing_ok=True)
+
+    def test_persisted_wildcard_ui_host_is_hardened_to_loopback(self) -> None:
+        auth_file = manager.DATA_DIR / "ui_auth.json"
+        try:
+            for wildcard in ("::", "0.0.0.0", ""):
+                manager.write_json(
+                    auth_file,
+                    {"username": "u", "password": "p", "host": wildcard, "port": 8787},
+                )
+                with mock.patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("UI_HOST", None)
+                    config = manager.load_ui_config()
+                self.assertEqual(
+                    "127.0.0.1", config["host"], f"wildcard {wildcard!r} not hardened"
+                )
+        finally:
+            auth_file.unlink(missing_ok=True)
+
+    def test_explicit_external_ui_host_env_is_respected(self) -> None:
+        auth_file = manager.DATA_DIR / "ui_auth.json"
+        try:
+            manager.write_json(
+                auth_file,
+                {"username": "u", "password": "p", "host": "0.0.0.0", "port": 8787},
+            )
+            with mock.patch.dict(os.environ, {"UI_HOST": "0.0.0.0"}, clear=False):
+                config = manager.load_ui_config()
+            self.assertEqual("0.0.0.0", config["host"])
+        finally:
+            auth_file.unlink(missing_ok=True)
+
     def test_source_deadline_limits_total_fetch_time(self) -> None:
         def slow_fetch(url, verify_ssl=True):
             threading.Event().wait(0.1)

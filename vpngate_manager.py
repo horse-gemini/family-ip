@@ -127,7 +127,11 @@ OPENVPN_AUTH_USER = os.environ.get("OPENVPN_AUTH_USER", "vpn")
 OPENVPN_AUTH_PASS = os.environ.get("OPENVPN_AUTH_PASS", "vpn")
 LOCAL_PROXY_HOST = os.environ.get("LOCAL_PROXY_HOST", "127.0.0.1")
 LOCAL_PROXY_PORT = env_int("LOCAL_PROXY_PORT", 7928, 1, 65535)
-UI_HOST = os.environ.get("UI_HOST", "::")
+# Web 管理后台默认仅监听回环地址（127.0.0.1），避免管理界面直接暴露在公网。
+# 如需对外访问，请通过 SSH 隧道，或显式将 UI_HOST 设为具体地址 / 0.0.0.0（注意风险）。
+UI_HOST = os.environ.get("UI_HOST", "127.0.0.1")
+# 通配 / 全网监听地址：出现在历史配置中时会被安全收敛为回环地址。
+EXPOSED_UI_HOSTS = {"", "*", "0.0.0.0", "::", "::0", "0.0.0.0.0.0.0.0"}
 UI_PORT = env_int("UI_PORT", 8787, 1, 65535)
 INVALID_BACKOFF_SECONDS = env_int("INVALID_BACKOFF_SECONDS", 30 * 60, 1)
 DEPLOYMENT_MODE = os.environ.get("DEPLOYMENT_MODE", "source").strip().lower()
@@ -379,7 +383,23 @@ def load_ui_config() -> dict[str, Any]:
         if normalized_discovery_countries != config.get("discovery_countries"):
             config["discovery_countries"] = normalized_discovery_countries
             updated = True
-            
+
+        # 安全加固：Web 管理后台默认仅监听回环地址。若历史配置中存的是通配 /
+        # 全网监听地址（0.0.0.0、:: 等），在运维未通过 UI_HOST 环境变量明确要求
+        # 对外监听时，自动收敛为 127.0.0.1，防止升级后管理界面仍暴露在公网。
+        env_ui_host = os.environ.get("UI_HOST", "").strip()
+        operator_wants_external = env_ui_host.lower() in EXPOSED_UI_HOSTS and env_ui_host != ""
+        current_host = str(config.get("host", "")).strip()
+        if current_host.lower() in EXPOSED_UI_HOSTS and not operator_wants_external:
+            if current_host != "127.0.0.1":
+                config["host"] = "127.0.0.1"
+                updated = True
+                print(
+                    f"[安全] Web 管理后台监听地址已由 {current_host or '(空)'} 收敛为 127.0.0.1，"
+                    "如需对外访问请使用 SSH 隧道或显式设置 UI_HOST。",
+                    flush=True,
+                )
+
         if not auth_file.exists() or updated:
             try:
                 DATA_DIR.mkdir(exist_ok=True, parents=True)
