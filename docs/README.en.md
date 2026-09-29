@@ -4,8 +4,8 @@
 
 **A VPNGate node manager and HTTP / HTTPS / SOCKS5 proxy gateway for Linux VPS hosts**
 
-[![Release](https://img.shields.io/github/v/release/yzl-job/family-ip?style=flat-square&label=stable&color=16a34a)](https://github.com/yzl-job/family-ip/releases/latest)
-[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/yzl-job/family-ip/pkgs/container/family-ip)
+[![Release](https://img.shields.io/github/v/release/horse-gemini/family-ip?style=flat-square&label=stable&color=16a34a)](https://github.com/horse-gemini/family-ip/releases/latest)
+[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/horse-gemini/family-ip/pkgs/container/family-ip)
 [![License](https://img.shields.io/badge/License-GPL--3.0-334155?style=flat-square)](../LICENSE)
 
 [简体中文](../README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md)
@@ -37,7 +37,7 @@ Family-IP uses Python's standard library to manage VPNGate nodes. It provides no
 Run as `root` on a supported Linux VPS:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/horse-gemini/family-ip/main/install.sh)
 ```
 
 The installer prints the complete Web URL, private path, username, and password. Run `ml` to open the management menu.
@@ -70,7 +70,7 @@ Before purchasing, confirm that the selected plan permits TUN/TAP, OpenVPN, and 
 ### Option 1: Source installer
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/horse-gemini/family-ip/main/install.sh)
 ```
 
 The installer deploys to `/opt/family-ip` and registers a system service.
@@ -78,7 +78,7 @@ The installer deploys to `/opt/family-ip` and registers a system service.
 For unattended installation, explicitly skip the first-run prompts and generate the Web path and credentials automatically:
 
 ```bash
-FAMILY_IP_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
+FAMILY_IP_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/horse-gemini/family-ip/main/install.sh)
 ```
 
 ```bash
@@ -94,26 +94,26 @@ ml uninstall       # Uninstall
 To inspect the installer first:
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+git clone --branch main --single-branch https://github.com/horse-gemini/family-ip.git
 cd family-ip
 sudo bash install.sh
 ```
 
-Universal Linux source archives and SHA-256 checksums are available from [GitHub Releases](https://github.com/yzl-job/family-ip/releases/latest). Version changes are documented in the Release Notes.
+Universal Linux source archives and SHA-256 checksums are available from [GitHub Releases](https://github.com/horse-gemini/family-ip/releases/latest). Version changes are documented in the Release Notes.
 
 ### Option 2: Docker Compose
 
 The Docker host must provide `/dev/net/tun`, host networking, `NET_ADMIN`, and `NET_RAW`.
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+git clone --branch main --single-branch https://github.com/horse-gemini/family-ip.git
 cd family-ip
 docker compose pull
 docker compose up -d
 docker logs -f family-ip
 ```
 
-Image: `ghcr.io/yzl-job/family-ip:2.1`
+Image: `ghcr.io/horse-gemini/family-ip:2.1`
 
 Update:
 
@@ -138,7 +138,7 @@ docker run -d \
   -e LOCAL_PROXY_HOST=127.0.0.1 \
   -e LOCAL_PROXY_PORT=7928 \
   -v family-ip-data:/data \
-  ghcr.io/yzl-job/family-ip:2.1
+  ghcr.io/horse-gemini/family-ip:2.1
 ```
 
 </details>
@@ -147,7 +147,7 @@ docker run -d \
 <summary><strong>Build locally when GHCR is unavailable</strong></summary>
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+git clone --branch main --single-branch https://github.com/horse-gemini/family-ip.git
 cd family-ip
 docker compose build
 docker compose up -d
@@ -227,7 +227,7 @@ After the tunnel is established:
 | Website / forum | Announcements and discussion | [339936.xyz](https://339936.xyz) |
 | Telegram group | Real-time community chat | [t.me/arestemple](https://t.me/arestemple) |
 | YouTube tutorial | Installation and usage video | [Watch](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
-| GitHub Issues | Reproducible bugs and feature requests | [Open an issue](https://github.com/yzl-job/family-ip/issues) |
+| GitHub Issues | Reproducible bugs and feature requests | [Open an issue](https://github.com/horse-gemini/family-ip/issues) |
 | Email | Bug reports and contact | [yaohunse7@gmail.com](mailto:yaohunse7@gmail.com) |
 
 <a id="legal"></a>
@@ -245,6 +245,6 @@ After the tunnel is established:
 
 <div align="center">
 
-[Stable Release](https://github.com/yzl-job/family-ip/releases/latest) · [Issues](https://github.com/yzl-job/family-ip/issues) · [GPL-3.0 License](../LICENSE)
+[Stable Release](https://github.com/horse-gemini/family-ip/releases/latest) · [Issues](https://github.com/horse-gemini/family-ip/issues) · [GPL-3.0 License](../LICENSE)
 
 </div>
