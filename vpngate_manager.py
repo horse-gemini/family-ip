@@ -98,15 +98,15 @@ API_HTTPS_URL = os.environ.get("VPNGATE_API_HTTPS_URL", "https://www.vpngate.net
 API_HTTP_URL = os.environ.get("VPNGATE_API_HTTP_URL", "http://www.vpngate.net/api/iphone/").strip()
 MIRROR_HTTPS_URL = os.environ.get(
     "VPNGATE_MIRROR_HTTPS_URL",
-    "https://yzl-job.github.io/family-ip/vpngate.csv",
+    "https://horse-gemini.github.io/family-ip/vpngate.csv",
 ).strip()
 MIRROR_HTTP_URL = os.environ.get(
     "VPNGATE_MIRROR_HTTP_URL",
-    "http://yzl-job.github.io/family-ip/vpngate.csv",
+    "http://horse-gemini.github.io/family-ip/vpngate.csv",
 ).strip()
 MIRROR_META_URL = os.environ.get(
     "VPNGATE_MIRROR_META_URL",
-    "https://yzl-job.github.io/family-ip/vpngate.meta.json",
+    "https://horse-gemini.github.io/family-ip/vpngate.meta.json",
 ).strip()
 # Kept as the primary URL for diagnostics and backwards-compatible state output.
 API_URL = API_HTTPS_URL
@@ -152,7 +152,7 @@ except OSError:
     _version_text = DEFAULT_APP_VERSION
 APP_VERSION = _version_text if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", _version_text) else DEFAULT_APP_VERSION
 APP_VERSION_LABEL = f"V{APP_VERSION} 正式版"
-GITHUB_REPOSITORY = "yzl-job/family-ip"
+GITHUB_REPOSITORY = "horse-gemini/family-ip"
 GITHUB_REPOSITORY_URL = f"https://github.com/{GITHUB_REPOSITORY}"
 GITHUB_MAIN_BRANCH_URL = f"{GITHUB_REPOSITORY_URL}/tree/main"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -4241,8 +4241,8 @@ INDEX_HTML = r"""<!doctype html>
           <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
           检测更新
         </button>
-        <a href="https://github.com/yzl-job/family-ip/tree/main" target="_blank" rel="noopener noreferrer">GitHub main 主分支</a>
-        <a id="latest_release_link" href="https://github.com/yzl-job/family-ip/releases/latest" target="_blank" rel="noopener noreferrer">下载最新正式版</a>
+        <a href="https://github.com/horse-gemini/family-ip/tree/main" target="_blank" rel="noopener noreferrer">GitHub main 主分支</a>
+        <a id="latest_release_link" href="https://github.com/horse-gemini/family-ip/releases/latest" target="_blank" rel="noopener noreferrer">下载最新正式版</a>
         <div id="update_check_status" class="update-check-status" role="status" aria-live="polite">点击“检测更新”查询 GitHub 最新正式版。</div>
       </div>
     </div>

@@ -1105,7 +1105,7 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertEqual("2.2.0", result["latest_version"])
         self.assertEqual("v2.2.0", result["latest_tag"])
         self.assertEqual(
-            "https://github.com/yzl-job/family-ip/releases/tag/v2.2.0",
+            "https://github.com/horse-gemini/family-ip/releases/tag/v2.2.0",
             result["release_url"],
         )
         fetch_mock.assert_called_once_with(manager.GITHUB_LATEST_RELEASE_API, True)

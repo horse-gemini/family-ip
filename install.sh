@@ -47,8 +47,8 @@ echo -e "${BLUE}        欢迎使用 Family-IP 一键源码部署与管理脚本
 echo -e "${BLUE}==========================================================${PLAIN}"
 
 # 3. Configure GitHub Repository URL
-# Default to the official repository (yzl-job/family-ip)
-DEFAULT_USER="yzl-job"
+# Default to the official repository (horse-gemini/family-ip)
+DEFAULT_USER="horse-gemini"
 DEFAULT_REPO="family-ip"
 
 # Allow custom repository override via command line arguments
@@ -186,7 +186,7 @@ import shutil
 
 INSTALL_DIR = "/opt/family-ip"
 LOG_FILE = "/opt/family-ip/vpngate_data/vpngate.log"
-GITHUB_URL = "https://github.com/yzl-job/family-ip.git"
+GITHUB_URL = "https://github.com/horse-gemini/family-ip.git"
 
 def generate_random_password():
     import secrets

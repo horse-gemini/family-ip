@@ -6,7 +6,7 @@ ARG BUILD_VERSION=dev
 
 LABEL org.opencontainers.image.title="Family-IP" \
       org.opencontainers.image.description="VPNGate node manager with HTTP and SOCKS5 proxy" \
-      org.opencontainers.image.source="https://github.com/yzl-job/family-ip" \
+      org.opencontainers.image.source="https://github.com/horse-gemini/family-ip" \
       org.opencontainers.image.version="${BUILD_VERSION}"
 
 RUN apt-get update \

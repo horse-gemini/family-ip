@@ -48,7 +48,7 @@ V2.1.5 已通过本地自动化、GitHub Actions 多版本/多架构构建，以
 随后严格执行 README 的无人值守 GitHub 安装方式：
 
 ```bash
-FAMILY_IP_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
+FAMILY_IP_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/horse-gemini/family-ip/main/install.sh)
 ```
 
 结果：

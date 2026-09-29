@@ -1,6 +1,6 @@
 services:
   family-ip:
-    image: ghcr.io/yzl-job/family-ip:2.1
+    image: ghcr.io/horse-gemini/family-ip:2.1
     build:
       context: .
       args:
