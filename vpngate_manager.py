@@ -98,15 +98,15 @@ API_HTTPS_URL = os.environ.get("VPNGATE_API_HTTPS_URL", "https://www.vpngate.net
 API_HTTP_URL = os.environ.get("VPNGATE_API_HTTP_URL", "http://www.vpngate.net/api/iphone/").strip()
 MIRROR_HTTPS_URL = os.environ.get(
     "VPNGATE_MIRROR_HTTPS_URL",
-    "https://yzl-job.github.io/aimili-vpngate-public/vpngate.csv",
+    "https://yzl-job.github.io/family-ip/vpngate.csv",
 ).strip()
 MIRROR_HTTP_URL = os.environ.get(
     "VPNGATE_MIRROR_HTTP_URL",
-    "http://yzl-job.github.io/aimili-vpngate-public/vpngate.csv",
+    "http://yzl-job.github.io/family-ip/vpngate.csv",
 ).strip()
 MIRROR_META_URL = os.environ.get(
     "VPNGATE_MIRROR_META_URL",
-    "https://yzl-job.github.io/aimili-vpngate-public/vpngate.meta.json",
+    "https://yzl-job.github.io/family-ip/vpngate.meta.json",
 ).strip()
 # Kept as the primary URL for diagnostics and backwards-compatible state output.
 API_URL = API_HTTPS_URL
@@ -148,7 +148,7 @@ except OSError:
     _version_text = DEFAULT_APP_VERSION
 APP_VERSION = _version_text if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", _version_text) else DEFAULT_APP_VERSION
 APP_VERSION_LABEL = f"V{APP_VERSION} 正式版"
-GITHUB_REPOSITORY = "yzl-job/aimili-vpngate-public"
+GITHUB_REPOSITORY = "yzl-job/family-ip"
 GITHUB_REPOSITORY_URL = f"https://github.com/{GITHUB_REPOSITORY}"
 GITHUB_MAIN_BRANCH_URL = f"{GITHUB_REPOSITORY_URL}/tree/main"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -804,7 +804,7 @@ def fetch_api_text(url: str | None = None, use_ssl_verify: bool = True) -> str:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": f"Mozilla/5.0 AimiliVPN/{APP_VERSION}",
+            "User-Agent": f"Mozilla/5.0 Family-IP/{APP_VERSION}",
             "Accept": "text/plain,*/*",
         },
     )
@@ -1399,7 +1399,7 @@ def kill_existing_openvpn_processes() -> None:
                     pass
                 except (OSError, PermissionError):
                     pass
-            print(f"[Cleanup] Terminated AimiliVPN OpenVPN processes: {killed_pids}", flush=True)
+            print(f"[Cleanup] Terminated Family-IP OpenVPN processes: {killed_pids}", flush=True)
     except Exception as e:
         print(f"[Cleanup Error] Failed to kill existing OpenVPN processes: {e}", flush=True)
 
@@ -2732,7 +2732,7 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AimiliVPN - 安全登录</title>
+  <title>Family-IP - 安全登录</title>
   <style>
     :root {
       --bg-dark: #090d16;
@@ -2924,7 +2924,7 @@ LOGIN_HTML = r"""<!DOCTYPE html>
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
         </svg>
       </div>
-      <h2 class="login-title">AimiliVPN</h2>
+      <h2 class="login-title">Family-IP</h2>
       <p class="login-subtitle">请输入您的管理账号和安全密码以继续</p>
       
       <form id="login_form" onsubmit="handleLogin(event)">
@@ -3007,7 +3007,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AimiliVPN 节点池管理系统</title>
+  <title>Family-IP 节点池管理系统</title>
   <style>
     :root {
       --bg-dark: #0b0f19;
@@ -4200,7 +4200,7 @@ INDEX_HTML = r"""<!doctype html>
   <div class="brand">
     <h1>
       <svg xmlns="http://www.w3.org/2000/svg" style="width:24px; height:24px; color:#818cf8;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
-      AimiliVPN 节点管理系统
+      Family-IP 节点管理系统
     </h1>
     <div id="status" class="status" role="status" aria-live="polite"><span class="status-dot"></span>服务加载中...</div>
   </div>
@@ -4221,8 +4221,8 @@ INDEX_HTML = r"""<!doctype html>
           <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
           检测更新
         </button>
-        <a href="https://github.com/yzl-job/aimili-vpngate-public/tree/main" target="_blank" rel="noopener noreferrer">GitHub main 主分支</a>
-        <a id="latest_release_link" href="https://github.com/yzl-job/aimili-vpngate-public/releases/latest" target="_blank" rel="noopener noreferrer">下载最新正式版</a>
+        <a href="https://github.com/yzl-job/family-ip/tree/main" target="_blank" rel="noopener noreferrer">GitHub main 主分支</a>
+        <a id="latest_release_link" href="https://github.com/yzl-job/family-ip/releases/latest" target="_blank" rel="noopener noreferrer">下载最新正式版</a>
         <div id="update_check_status" class="update-check-status" role="status" aria-live="polite">点击“检测更新”查询 GitHub 最新正式版。</div>
       </div>
     </div>

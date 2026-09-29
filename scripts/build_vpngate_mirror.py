@@ -25,7 +25,7 @@ def fetch_snapshot(url: str, timeout: int) -> str:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "AimiliVPN-Mirror/1.0",
+            "User-Agent": "Family-IP-Mirror/1.0",
             "Accept": "text/plain,*/*",
         },
     )

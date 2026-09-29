@@ -1,11 +1,11 @@
 <div align="center">
 
-# AimiliVPN
+# Family-IP
 
 **面向 Linux VPS 的 VPNGate 节点管理与 HTTP / HTTPS / SOCKS5 代理网关**
 
-[![正式版本](https://img.shields.io/github/v/release/yzl-job/aimili-vpngate-public?style=flat-square&label=正式版&color=16a34a)](https://github.com/yzl-job/aimili-vpngate-public/releases/latest)
-[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/yzl-job/aimili-vpngate-public/pkgs/container/aimili-vpngate-public)
+[![正式版本](https://img.shields.io/github/v/release/yzl-job/family-ip?style=flat-square&label=正式版&color=16a34a)](https://github.com/yzl-job/family-ip/releases/latest)
+[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/yzl-job/family-ip/pkgs/container/family-ip)
 [![License](https://img.shields.io/badge/License-GPL--3.0-334155?style=flat-square)](LICENSE)
 
 **简体中文** · [English](docs/README.en.md) · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md)
@@ -46,7 +46,7 @@
 | **OpenMili** | OpenMili Ai 中转站推荐：GPT-6 Astra & Images 2.0 Pro 美区原价 0.12倍率 不掺假、不降智，接受任何压力测试！| [立即查看](https://openmili.com/) |
 | **JTTI VPS** | 稳定建站服务器推荐：5 Mbps 独享带宽 无限流量 CN2/9929/CMI三网直连，跨境网站访问低延迟，长期稳定API运营。| [立即查看](https://www.jtti.cc/zh/activity/y2026-national-day.html?k=baoweise) |
 
-AimiliVPN 使用 Python 标准库管理 VPNGate 节点，提供节点获取与检测、连接切换、Web 管理后台，以及共用一个端口的 HTTP、HTTPS 网站代理和 SOCKS5 代理服务。
+Family-IP 使用 Python 标准库管理 VPNGate 节点，提供节点获取与检测、连接切换、Web 管理后台，以及共用一个端口的 HTTP、HTTPS 网站代理和 SOCKS5 代理服务。
 
 | 项目 | 默认值或支持范围 |
 | --- | --- |
@@ -65,7 +65,7 @@ AimiliVPN 使用 Python 标准库管理 VPNGate 节点，提供节点获取与�
 使用 `root` 用户在受支持的 Linux VPS 上执行：
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
 安装完成后，终端会显示 Web 后台完整地址、随机安全路径、登录账号和密码。输入 `ml` 可打开管理菜单。
@@ -73,7 +73,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/
 无人值守安装可显式跳过首次参数询问，并自动生成安全路径和登录凭据：
 
 ```bash
-AIMILIVPN_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+FAMILY_IP_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
 > [!TIP]
@@ -91,10 +91,10 @@ AIMILIVPN_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl
 ### 方式一：一键源码安装
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
-安装器会部署到 `/opt/aimilivpn` 并注册系统服务。常用命令：
+安装器会部署到 `/opt/family-ip` 并注册系统服务。常用命令：
 
 ```bash
 ml                 # 打开管理菜单
@@ -109,26 +109,26 @@ ml uninstall       # 卸载
 需要先审查脚本时：
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 sudo bash install.sh
 ```
 
-通用 Linux 源码包与 SHA-256 校验文件可在 [GitHub Releases](https://github.com/yzl-job/aimili-vpngate-public/releases/latest) 下载，版本变更记录也统一放在 Release Notes 中。
+通用 Linux 源码包与 SHA-256 校验文件可在 [GitHub Releases](https://github.com/yzl-job/family-ip/releases/latest) 下载，版本变更记录也统一放在 Release Notes 中。
 
 ### 方式二：Docker Compose
 
 Docker 主机需要 `/dev/net/tun`、host 网络以及 `NET_ADMIN`、`NET_RAW` 权限。
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 docker compose pull
 docker compose up -d
-docker logs -f aimilivpn
+docker logs -f family-ip
 ```
 
-正式镜像：`ghcr.io/yzl-job/aimili-vpngate-public:2.1`
+正式镜像：`ghcr.io/yzl-job/family-ip:2.1`
 
 更新容器：
 
@@ -142,7 +142,7 @@ docker compose up -d
 
 ```bash
 docker run -d \
-  --name aimilivpn \
+  --name family-ip \
   --restart unless-stopped \
   --network host \
   --cap-add NET_ADMIN \
@@ -152,8 +152,8 @@ docker run -d \
   -e UI_PORT=8787 \
   -e LOCAL_PROXY_HOST=127.0.0.1 \
   -e LOCAL_PROXY_PORT=7928 \
-  -v aimilivpn-data:/data \
-  ghcr.io/yzl-job/aimili-vpngate-public:2.1
+  -v family-ip-data:/data \
+  ghcr.io/yzl-job/family-ip:2.1
 ```
 
 </details>
@@ -162,8 +162,8 @@ docker run -d \
 <summary><strong>无法拉取 GHCR 时在 VPS 本地构建</strong></summary>
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 docker compose build
 docker compose up -d
 ```
@@ -186,7 +186,7 @@ http://VPS_IP:8787/随机安全路径/
 Docker 用户可以读取首次启动时保存的 Web 配置：
 
 ```bash
-docker exec aimilivpn cat /data/ui_auth.json
+docker exec family-ip cat /data/ui_auth.json
 ```
 
 使用其中的 `secret_path`、`username` 和 `password` 登录，并在首次登录后修改安全路径和凭据。
@@ -270,7 +270,7 @@ ssh -N \
 | 项目网站 / 交流论坛 | 公告、经验交流与讨论 | [339936.xyz](https://339936.xyz) |
 | Telegram 群 | 即时交流 | [t.me/arestemple](https://t.me/arestemple) |
 | YouTube 教程 | 安装和使用视频 | [观看视频](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
-| GitHub Issues | 可复现的问题与功能建议 | [提交 Issue](https://github.com/yzl-job/aimili-vpngate-public/issues) |
+| GitHub Issues | 可复现的问题与功能建议 | [提交 Issue](https://github.com/yzl-job/family-ip/issues) |
 
 <a id="legal"></a>
 ## 使用范围与法律声明
@@ -287,6 +287,6 @@ ssh -N \
 
 <div align="center">
 
-[正式版本](https://github.com/yzl-job/aimili-vpngate-public/releases/latest) · [问题反馈](https://github.com/yzl-job/aimili-vpngate-public/issues) · [GPL-3.0 License](LICENSE)
+[正式版本](https://github.com/yzl-job/family-ip/releases/latest) · [问题反馈](https://github.com/yzl-job/family-ip/issues) · [GPL-3.0 License](LICENSE)
 
 </div>

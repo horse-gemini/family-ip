@@ -1,4 +1,4 @@
-# AimiliVPN V2.1.2 VPS 全功能验收报告
+# Family-IP V2.1.2 VPS 全功能验收报告
 
 测试日期：2026-08-27（Asia/Shanghai）
 测试版本：`2.1.2`
@@ -9,7 +9,7 @@ Git 提交：`f190d74`
 
 ## 1. 执行摘要
 
-AimiliVPN V2.1.2 的主要工作流在 Ubuntu 22.04 x86_64 VPS 上可以正常运行：公开脚本能够安装，VPNGate 官方源、GitHub Pages 镜像、本地最近快照和程序内置快照均能产生合法候选节点；固定 IP、固定国家、住宅类型、收藏、手动断开和自动切换等核心逻辑可用。
+Family-IP V2.1.2 的主要工作流在 Ubuntu 22.04 x86_64 VPS 上可以正常运行：公开脚本能够安装，VPNGate 官方源、GitHub Pages 镜像、本地最近快照和程序内置快照均能产生合法候选节点；固定 IP、固定国家、住宅类型、收藏、手动断开和自动切换等核心逻辑可用。
 
 本轮共执行五类节点失效/恢复压力场景。固定 IP 模式可以恢复原节点，固定国家与住宅策略可以保持约束并切换，真实阻断节点远端 IP/端口后可以恢复，自动全部模式可以跨 IP 类型切换，官方与镜像同时失效时也可以依赖本地快照继续恢复连接。
 
@@ -49,7 +49,7 @@ IPv6 测试只证明回环访问、双栈监听和通过 IPv4 VPN 出口转发�
 严格执行 README 命令：
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
 结果：
@@ -64,7 +64,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/
 
 ### 4.2 最终公开脚本重装
 
-在完成卸载残留审计并只清理 AimiliVPN 自身残留后，再次执行相同公开命令。
+在完成卸载残留审计并只清理 Family-IP 自身残留后，再次执行相同公开命令。
 
 结果：
 
@@ -320,7 +320,7 @@ GitHub Pages 远端元数据生成于 `2026-08-26T19:16:58Z`。复测时为 `202
 
 成功删除：
 
-- `/opt/aimilivpn`。
+- `/opt/family-ip`。
 - `/usr/bin/ml`。
 - systemd unit 文件和 enable 链接。
 - OpenVPN 进程。
@@ -329,10 +329,10 @@ GitHub Pages 远端元数据生成于 `2026-08-26T19:16:58Z`。复测时为 `202
 
 稳定残留：
 
-1. `/etc/sysctl.d/99-aimilivpn.conf`。
+1. `/etc/sysctl.d/99-family-ip.conf`。
 2. `oif tun0 [detached] lookup 100` 策略规则。
 
-因此当前“完全卸载”并不完整。最终重装前只删除了上述两个 AimiliVPN 自身创建的残留。
+因此当前“完全卸载”并不完整。最终重装前只删除了上述两个 Family-IP 自身创建的残留。
 
 ## 12. 浏览器与前端
 
@@ -380,7 +380,7 @@ GitHub Pages 远端元数据生成于 `2026-08-26T19:16:58Z`。复测时为 `202
 
 ## 14. 修复建议顺序
 
-1. 卸载时删除 `/etc/sysctl.d/99-aimilivpn.conf`，并无条件循环清除所有 table 100 相关规则和路由。
+1. 卸载时删除 `/etc/sysctl.d/99-family-ip.conf`，并无条件循环清除所有 table 100 相关规则和路由。
 2. 创建和更新 `ui_auth.json` 后强制 `chmod 600`，同时处理已有安装升级迁移。
 3. `/api/update_credentials` 增加 Web/代理端口冲突校验。
 4. 统一固定国家存储格式，建议持久化 ISO 3166-1 alpha-2，显示时再翻译中文。
@@ -399,7 +399,7 @@ GitHub Pages 远端元数据生成于 `2026-08-26T19:16:58Z`。复测时为 `202
 
 - 公开 README 一键脚本重新安装完成。
 - 版本 `2.1.2`，提交 `f190d74`。
-- `aimilivpn.service`：enabled、active。
+- `family-ip.service`：enabled、active。
 - 节点来源：`official_https`。
 - 最后一次网页刷新节点数量：97。
 - 两个被节点检测清空元数据的节点已由后台富化自动恢复，最终缺失数为 0。
@@ -409,7 +409,7 @@ GitHub Pages 远端元数据生成于 `2026-08-26T19:16:58Z`。复测时为 `202
 - Web 和代理配置恢复为自动、全部 IP、全部国家、0 个收藏。
 - 策略规则：1 条。
 - table 100 默认路由：1 条。
-- `AIMILI_TEST_*` 防火墙规则：0 条。
+- `FAMILY_IP_TEST_*` 防火墙规则：0 条。
 - IPv6 内核开关：恢复原始 1/1/1。
 - 临时安装日志、临时代理和隔离测试目录：已清理。
 
@@ -438,7 +438,7 @@ GitHub Pages 远端元数据生成于 `2026-08-26T19:16:58Z`。复测时为 `202
 - 物理位置国旗改用 IP 情报源 `geo_country_short`；VPNGate 申报国家仍在节点标题中单独展示，并通过提示说明两类数据来源。
 - 官方 HTTPS 超时后仍会继续尝试官方 HTTP。VPS 隔离测试依次验证 `official_http`、`github_pages_https`、`local_cache` 和 `bundled_initial` 均可返回 99 个节点。
 - GitHub 镜像状态增加生成时间和陈旧程度；默认 GitHub HTTP 来源明确标记为“重定向到 HTTPS”，不再描述为独立 HTTP 镜像。
-- 安装器支持 `AIMILIVPN_NONINTERACTIVE=1`，真实无人值守安装不会停在首次询问；安装完成提示只展示实际默认监听的 IPv4 本地代理地址。
+- 安装器支持 `FAMILY_IP_NONINTERACTIVE=1`，真实无人值守安装不会停在首次询问；安装完成提示只展示实际默认监听的 IPv4 本地代理地址。
 
 平台限制：GitHub Actions 的 schedule 不保证准点，GitHub Pages 也由平台强制 HTTP 跳转 HTTPS。这两项无法在客户端代码中消除，只能通过镜像新鲜度提示、官方真实 HTTP、本地缓存和内置快照降低影响。
 

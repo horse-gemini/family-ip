@@ -45,14 +45,14 @@ def build_archive(root: Path, output_dir: Path) -> Path:
         raise FileNotFoundError("发行文件缺失: mirror")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    for stale_archive in output_dir.glob("aimilivpn-v*-linux-*.tar.gz"):
+    for stale_archive in output_dir.glob("family-ip-v*-linux-*.tar.gz"):
         stale_archive.unlink()
     checksum_path = output_dir / "sha256sums.txt"
     checksum_path.unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="aimilivpn-release-") as temp_name:
+    with tempfile.TemporaryDirectory(prefix="family-ip-release-") as temp_name:
         temp_root = Path(temp_name)
-        package_name = f"aimilivpn-v{version}-linux-source"
+        package_name = f"family-ip-v{version}-linux-source"
         package_root = temp_root / package_name
         package_root.mkdir()
 
@@ -70,7 +70,7 @@ def build_archive(root: Path, output_dir: Path) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="构建 AimiliVPN Linux 通用 Python 源码发行包")
+    parser = argparse.ArgumentParser(description="构建 Family-IP Linux 通用 Python 源码发行包")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--output-dir", type=Path, default=Path("dist"))
     args = parser.parse_args()

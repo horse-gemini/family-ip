@@ -1030,9 +1030,9 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertIn("ip link show dev tun0", install_text)
         self.assertIn("pidof openvpn", install_text)
         self.assertIn('chmod 600 "$AUTH_FILE"', install_text)
-        self.assertIn("AIMILIVPN_NONINTERACTIVE", install_text)
+        self.assertIn("FAMILY_IP_NONINTERACTIVE", install_text)
         self.assertIn('["ip", "rule", "del", "table", "100"]', install_text)
-        self.assertIn('/etc/sysctl.d/99-aimilivpn.conf', install_text)
+        self.assertIn('/etc/sysctl.d/99-family-ip.conf', install_text)
         self.assertNotIn('http://[::1]:${PROXY_PORT}', install_text)
 
     def test_openvpn_command_requires_server_certificate_usage(self) -> None:
@@ -1045,13 +1045,13 @@ class ManagerLogicTests(unittest.TestCase):
         workflow_text = (manager.ROOT_DIR / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
         self.assertIn("default: v2.1.5", workflow_text)
-        self.assertIn("AimiliVPN V$(tr -d '\\r\\n' < VERSION) 正式版", workflow_text)
+        self.assertIn("Family-IP V$(tr -d '\\r\\n' < VERSION) 正式版", workflow_text)
         self.assertNotIn("cut -d. -f1,2 VERSION", workflow_text)
 
     def test_latest_release_check_ignores_non_version_name_text(self) -> None:
         release = {
             "tag_name": "v2.2.0",
-            "name": "AimiliVPN V2.2 正式版",
+            "name": "Family-IP V2.2 正式版",
             "published_at": "2026-09-01T00:00:00Z",
             "draft": False,
             "prerelease": False,
@@ -1064,7 +1064,7 @@ class ManagerLogicTests(unittest.TestCase):
         self.assertEqual("2.2.0", result["latest_version"])
         self.assertEqual("v2.2.0", result["latest_tag"])
         self.assertEqual(
-            "https://github.com/yzl-job/aimili-vpngate-public/releases/tag/v2.2.0",
+            "https://github.com/yzl-job/family-ip/releases/tag/v2.2.0",
             result["release_url"],
         )
         fetch_mock.assert_called_once_with(manager.GITHUB_LATEST_RELEASE_API, True)
@@ -1072,7 +1072,7 @@ class ManagerLogicTests(unittest.TestCase):
     def test_latest_release_check_reports_current_formal_version(self) -> None:
         release = {
             "tag_name": "v2.1.5",
-            "name": "AimiliVPN V2.1.5 正式版",
+            "name": "Family-IP V2.1.5 正式版",
             "draft": False,
             "prerelease": False,
         }

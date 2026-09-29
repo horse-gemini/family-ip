@@ -1,11 +1,11 @@
 services:
-  aimilivpn:
-    image: ghcr.io/yzl-job/aimili-vpngate-public:2.1
+  family-ip:
+    image: ghcr.io/yzl-job/family-ip:2.1
     build:
       context: .
       args:
         BUILD_VERSION: local
-    container_name: aimilivpn
+    container_name: family-ip
     network_mode: host
     cap_drop:
       - ALL
@@ -22,11 +22,11 @@ services:
       LOCAL_PROXY_HOST: "127.0.0.1"
       LOCAL_PROXY_PORT: "7928"
     volumes:
-      - aimilivpn-data:/data
+      - family-ip-data:/data
     init: true
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
 
 volumes:
-  aimilivpn-data:
+  family-ip-data:

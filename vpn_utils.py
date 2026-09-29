@@ -507,7 +507,7 @@ def extract_ipapi_is_signals(payload: dict[str, Any]) -> dict[str, Any]:
 def query_secondary_ip_type(ip: str) -> dict[str, Any] | None:
     request = urllib.request.Request(
         f"https://api.ipapi.is/?q={urllib.parse.quote(ip)}",
-        headers={"User-Agent": f"AimiliVPN-IP-Classifier/{IP_CLASSIFICATION_VERSION}"},
+        headers={"User-Agent": f"Family-IP-Classifier/{IP_CLASSIFICATION_VERSION}"},
     )
     try:
         with urllib.request.urlopen(request, timeout=6) as response:
@@ -587,7 +587,7 @@ def enrich_ip_info(nodes: list[dict[str, Any]]) -> None:
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": f"AimiliVPN-IP-Classifier/{IP_CLASSIFICATION_VERSION}",
+                "User-Agent": f"Family-IP-Classifier/{IP_CLASSIFICATION_VERSION}",
             },
             method="POST",
         )

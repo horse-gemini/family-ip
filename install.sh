@@ -43,13 +43,13 @@ case "$OS_TYPE" in
 esac
 
 echo -e "${BLUE}==========================================================${PLAIN}"
-echo -e "${BLUE}        欢迎使用 AimiliVPN 一键源码部署与管理脚本${PLAIN}"
+echo -e "${BLUE}        欢迎使用 Family-IP 一键源码部署与管理脚本${PLAIN}"
 echo -e "${BLUE}==========================================================${PLAIN}"
 
 # 3. Configure GitHub Repository URL
-# Default to the official repository (yzl-job/aimili-vpngate-public)
+# Default to the official repository (yzl-job/family-ip)
 DEFAULT_USER="yzl-job"
-DEFAULT_REPO="aimili-vpngate-public"
+DEFAULT_REPO="family-ip"
 
 # Allow custom repository override via command line arguments
 GITHUB_USER="${1:-${DEFAULT_USER}}"
@@ -81,7 +81,7 @@ elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
 fi
 
 # 4. Clone or pull the repository
-INSTALL_DIR="/opt/aimilivpn"
+INSTALL_DIR="/opt/family-ip"
 DEPLOY_BRANCH="main"
 
 echo -e "\n${YELLOW}[2/4] 正在从 GitHub 部署源代码到 ${INSTALL_DIR} (目标分支: ${DEPLOY_BRANCH})...${PLAIN}"
@@ -127,10 +127,10 @@ fi
 # 5. Configure Service
 echo -e "\n${YELLOW}[3/4] 正在配置系统服务...${PLAIN}"
 if command -v systemctl >/dev/null 2>&1; then
-    echo -e "  -> 检测到 systemd，正在创建服务配置 /lib/systemd/system/aimilivpn.service ..."
-    cat > /lib/systemd/system/aimilivpn.service <<EOF
+    echo -e "  -> 检测到 systemd，正在创建服务配置 /lib/systemd/system/family-ip.service ..."
+    cat > /lib/systemd/system/family-ip.service <<EOF
 [Unit]
-Description=AimiliVPN OpenVPN Manager with HTTP/SOCKS5 Proxy
+Description=Family-IP OpenVPN Manager with HTTP/SOCKS5 Proxy
 After=network.target
 
 [Service]
@@ -140,32 +140,32 @@ ExecStart=/usr/bin/python3 vpngate_manager.py
 Restart=always
 RestartSec=5
 Environment=DEPLOYMENT_MODE=source
-EnvironmentFile=-/etc/default/aimilivpn
+EnvironmentFile=-/etc/default/family-ip
 
 [Install]
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable aimilivpn.service
+    systemctl enable family-ip.service
 elif command -v rc-service >/dev/null 2>&1; then
-    echo -e "  -> 检测到 OpenRC，正在创建服务配置 /etc/init.d/aimilivpn ..."
-    cat > /etc/init.d/aimilivpn <<EOF
+    echo -e "  -> 检测到 OpenRC，正在创建服务配置 /etc/init.d/family-ip ..."
+    cat > /etc/init.d/family-ip <<EOF
 #!/sbin/openrc-run
 
-description="AimiliVPN OpenVPN Manager with HTTP/SOCKS5 Proxy"
+description="Family-IP OpenVPN Manager with HTTP/SOCKS5 Proxy"
 command="/usr/bin/python3"
 command_args="${INSTALL_DIR}/vpngate_manager.py"
 command_background="yes"
 directory="${INSTALL_DIR}"
-pidfile="/run/aimilivpn.pid"
+pidfile="/run/family-ip.pid"
 
 depend() {
     need net
     after firewall
 }
 EOF
-    chmod +x /etc/init.d/aimilivpn
-    rc-update add aimilivpn default
+    chmod +x /etc/init.d/family-ip
+    rc-update add family-ip default
 else
     echo -e "${YELLOW}警告: 未能检测到 systemd 或 OpenRC，请手动管理服务。${PLAIN}"
 fi
@@ -184,9 +184,9 @@ import tty
 import termios
 import shutil
 
-INSTALL_DIR = "/opt/aimilivpn"
-LOG_FILE = "/opt/aimilivpn/vpngate_data/vpngate.log"
-GITHUB_URL = "https://github.com/yzl-job/aimili-vpngate-public.git"
+INSTALL_DIR = "/opt/family-ip"
+LOG_FILE = "/opt/family-ip/vpngate_data/vpngate.log"
+GITHUB_URL = "https://github.com/yzl-job/family-ip.git"
 
 def generate_random_password():
     import secrets
@@ -213,7 +213,7 @@ def get_app_version():
 
 def load_ui_cfg():
     import json
-    path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
+    path = "/opt/family-ip/vpngate_data/ui_auth.json"
     cfg = {"host": "::", "port": 8787, "secret_path": "EJsW2EeBo9lY", "password": ""}
     if os.path.exists(path):
         try:
@@ -227,7 +227,7 @@ def load_ui_cfg():
 
 def save_ui_cfg(cfg):
     import json
-    path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
+    path = "/opt/family-ip/vpngate_data/ui_auth.json"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         if os.path.exists(path):
@@ -241,7 +241,7 @@ def save_ui_cfg(cfg):
 
 def load_state():
     import json
-    path = "/opt/aimilivpn/vpngate_data/state.json"
+    path = "/opt/family-ip/vpngate_data/state.json"
     state = {"active_openvpn_node_id": "", "last_check_message": "", "is_connecting": False}
     if os.path.exists(path):
         try:
@@ -255,7 +255,7 @@ def load_state():
 
 def get_active_node_info():
     import json
-    path = "/opt/aimilivpn/vpngate_data/nodes.json"
+    path = "/opt/family-ip/vpngate_data/nodes.json"
     state = load_state()
     active_id = state.get("active_openvpn_node_id")
     if not active_id:
@@ -295,7 +295,7 @@ def ping_ip(ip):
         return "无法连接"
 
 def get_public_ip():
-    path = "/opt/aimilivpn/vpngate_data/public_ip.txt"
+    path = "/opt/family-ip/vpngate_data/public_ip.txt"
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -335,7 +335,7 @@ def check_port_listening(port):
             pass
     return False
 
-def get_service_pid(service_name="aimilivpn.service"):
+def get_service_pid(service_name="family-ip.service"):
     try:
         for pid_dir in os.listdir('/proc'):
             if pid_dir.isdigit():
@@ -350,7 +350,7 @@ def get_service_pid(service_name="aimilivpn.service"):
         pass
     return None
 
-def check_service_active(service_name="aimilivpn.service"):
+def check_service_active(service_name="family-ip.service"):
     return get_service_pid(service_name) is not None
 
 def check_openvpn_process():
@@ -360,7 +360,7 @@ def check_openvpn_process():
                 try:
                     with open(os.path.join('/proc', pid_dir, 'cmdline'), 'r') as f:
                         cmd = f.read().replace('\x00', ' ')
-                        if 'openvpn' in cmd and ('/opt/aimilivpn/vpngate_data' in cmd or '/opt/aimilivpn/vpngate_data/configs' in cmd):
+                        if 'openvpn' in cmd and ('/opt/family-ip/vpngate_data' in cmd or '/opt/family-ip/vpngate_data/configs' in cmd):
                             return True
                 except Exception:
                     continue
@@ -398,9 +398,9 @@ def print_status():
     is_connecting = state.get("is_connecting", False)
     
     gateway_ok = check_port_listening(proxy_port)
-    service_ok = check_service_active("aimilivpn.service")
+    service_ok = check_service_active("family-ip.service")
     openvpn_ok = check_openvpn_process()
-    pid = get_service_pid("aimilivpn.service")
+    pid = get_service_pid("family-ip.service")
     
     active_ip, active_loc = get_active_node_info()
     latency = state.get("active_node_latency", "测试中...") if active_ip else "无活动连接"
@@ -421,7 +421,7 @@ def print_status():
         openvpn_status = f"{green}[已连接]{reset}" if openvpn_ok else f"{red}[未连接]{reset}"
     
     print_line("=======================================================")
-    print_line(f"               {bold}AimiliVPN 管理终端 v{get_app_version()}{reset}                ")
+    print_line(f"               {bold}Family-IP 管理终端 v{get_app_version()}{reset}                ")
     print_line("=======================================================")
     print_line("【核心服务状态】")
     print_line(format_line(f"代理网关 (Port {proxy_port})", gateway_status))
@@ -489,32 +489,32 @@ def print_status():
 
 def run_service_cmd(cmd):
     if shutil.which("systemctl"):
-        subprocess.run(["systemctl", cmd, "aimilivpn.service"])
+        subprocess.run(["systemctl", cmd, "family-ip.service"])
     elif shutil.which("rc-service"):
-        subprocess.run(["rc-service", "aimilivpn", cmd])
+        subprocess.run(["rc-service", "family-ip", cmd])
     else:
         print("未检测到支持的服务管理器 (systemd/OpenRC)")
 
 def start_service():
-    print("正在启动 AimiliVPN 服务...", flush=True)
+    print("正在启动 Family-IP 服务...", flush=True)
     run_service_cmd("start")
     print("已发送启动指令。")
     time.sleep(1)
 
 def stop_service():
-    print("正在停止 AimiliVPN 服务...", flush=True)
+    print("正在停止 Family-IP 服务...", flush=True)
     run_service_cmd("stop")
     print("已发送停止指令。")
     time.sleep(1)
 
 def restart_service():
-    print("正在重启 AimiliVPN 服务...", flush=True)
+    print("正在重启 Family-IP 服务...", flush=True)
     run_service_cmd("restart")
     print("已发送重启指令。")
     time.sleep(1)
 
 def show_logs():
-    print("正在查看 AimiliVPN 日志 (按 Ctrl+C 退出)...", flush=True)
+    print("正在查看 Family-IP 日志 (按 Ctrl+C 退出)...", flush=True)
     if os.path.exists(LOG_FILE):
         try:
             subprocess.run(["tail", "-f", "-n", "50", LOG_FILE])
@@ -590,22 +590,22 @@ def update_service():
         time.sleep(2)
 
 def uninstall_service():
-    confirm = input("确定要完全卸载 AimiliVPN 吗？(y/N): ")
+    confirm = input("确定要完全卸载 Family-IP 吗？(y/N): ")
     if confirm.lower() == 'y':
-        print("正在完全卸载 AimiliVPN...", flush=True)
+        print("正在完全卸载 Family-IP...", flush=True)
         stop_service()
         if shutil.which("systemctl"):
-            subprocess.run(["systemctl", "disable", "aimilivpn.service"])
-            for unit_path in ("/lib/systemd/system/aimilivpn.service", "/etc/systemd/system/aimilivpn.service"):
+            subprocess.run(["systemctl", "disable", "family-ip.service"])
+            for unit_path in ("/lib/systemd/system/family-ip.service", "/etc/systemd/system/family-ip.service"):
                 try:
                     os.unlink(unit_path)
                 except FileNotFoundError:
                     pass
             subprocess.run(["systemctl", "daemon-reload"], check=False)
         elif shutil.which("rc-service"):
-            subprocess.run(["rc-update", "del", "aimilivpn"])
+            subprocess.run(["rc-update", "del", "family-ip"])
             try:
-                os.unlink("/etc/init.d/aimilivpn")
+                os.unlink("/etc/init.d/family-ip")
             except Exception:
                 pass
         try:
@@ -622,14 +622,14 @@ def uninstall_service():
             ).returncode == 0:
                 pass
         try:
-            os.unlink("/etc/sysctl.d/99-aimilivpn.conf")
+            os.unlink("/etc/sysctl.d/99-family-ip.conf")
         except FileNotFoundError:
             pass
         if shutil.which("sysctl"):
             subprocess.run(["sysctl", "--system"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        if os.path.realpath(INSTALL_DIR) == "/opt/aimilivpn" and os.path.isdir(INSTALL_DIR):
+        if os.path.realpath(INSTALL_DIR) == "/opt/family-ip" and os.path.isdir(INSTALL_DIR):
             shutil.rmtree(INSTALL_DIR)
-        print("AimiliVPN 已卸载！")
+        print("Family-IP 已卸载！")
         sys.exit(0)
     else:
         print("已取消卸载。")
@@ -638,7 +638,7 @@ def uninstall_service():
 def ask_restart():
     ans = input("配置已保存。是否立即重启服务生效？(Y/n): ").strip().lower()
     if ans in ('', 'y', 'yes'):
-        print("正在重启 AimiliVPN 服务...", flush=True)
+        print("正在重启 Family-IP 服务...", flush=True)
         restart_service()
         print("服务已重启。")
         time.sleep(1.5)
@@ -857,9 +857,9 @@ def get_status_state():
         state.get("proxy_latency_ms", 0),
         state.get("proxy_ok", False),
         check_port_listening(proxy_port),
-        check_service_active("aimilivpn.service"),
+        check_service_active("family-ip.service"),
         check_openvpn_process(),
-        get_service_pid("aimilivpn.service")
+        get_service_pid("family-ip.service")
     )
 
 def main():
@@ -999,7 +999,7 @@ mkdir -p "${INSTALL_DIR}/vpngate_data"
 
 is_custom="n"
 if [ ! -f "$AUTH_FILE" ]; then
-    if [ -t 0 ] && [ "${AIMILIVPN_NONINTERACTIVE:-0}" != "1" ]; then
+    if [ -t 0 ] && [ "${FAMILY_IP_NONINTERACTIVE:-0}" != "1" ]; then
         echo -e "\n${YELLOW}检测到是首次安装，是否需要自定义配置网页端参数（端口/安全后缀/登录账号密码）？${PLAIN}"
         read -p "是否自定义配置？[y/N]: " is_custom
     else
@@ -1108,11 +1108,11 @@ chmod 600 "$AUTH_FILE"
 # 8.5 Optimize network parameters (rp_filter for policy routing)
 echo -e "\n正在优化网络参数 (配置反向路径过滤 rp_filter=2 以支持策略路由)..."
 if [ -d "/etc/sysctl.d" ]; then
-    cat > /etc/sysctl.d/99-aimilivpn.conf <<EOF
+    cat > /etc/sysctl.d/99-family-ip.conf <<EOF
 net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.default.rp_filter = 2
 EOF
-    sysctl -p /etc/sysctl.d/99-aimilivpn.conf >/dev/null 2>&1 || true
+    sysctl -p /etc/sysctl.d/99-family-ip.conf >/dev/null 2>&1 || true
 else
     # Fallback to appending to /etc/sysctl.conf
     if ! grep -q "net.ipv4.conf.all.rp_filter" /etc/sysctl.conf; then
@@ -1135,7 +1135,7 @@ if [ -d "/proc/sys/net/ipv4/conf" ]; then
     done
 fi
 
-echo -e "\n正在启动 AimiliVPN 服务并初始化网络..."
+echo -e "\n正在启动 Family-IP 服务并初始化网络..."
 # Avoid treating the previous process' persisted node ID as a successful new
 # connection during upgrades. The service will replace this startup state.
 if [ -f "${INSTALL_DIR}/vpngate_data/state.json" ]; then
@@ -1153,13 +1153,13 @@ state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding=
 PY
 fi
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart aimilivpn.service || true
+    systemctl restart family-ip.service || true
 elif command -v rc-service >/dev/null 2>&1; then
-    rc-service aimilivpn restart || true
+    rc-service family-ip restart || true
 fi
 
 # Wait and poll for node loading and active connection
-echo -e "\n正在等待 AimiliVPN 首次获取节点并建立加密通道 (此过程可能需要 5-90 秒)..."
+echo -e "\n正在等待 Family-IP 首次获取节点并建立加密通道 (此过程可能需要 5-90 秒)..."
 ACTIVE_ID=""
 LAST_MSG=""
 for i in {1..90}; do
@@ -1217,7 +1217,7 @@ echo -e "正在获取 VPS 公网 IPv6..."
 PUBLIC_IPV6=$(curl -6 -s --max-time 3 https://api.ipify.org || curl -6 -s --max-time 3 https://ifconfig.me || curl -6 -s --max-time 3 icanhazip.com || echo "")
 
 echo -e "\n${GREEN}==========================================================${PLAIN}"
-echo -e "${GREEN}             AimiliVPN 源码一键部署已完成！${PLAIN}"
+echo -e "${GREEN}             Family-IP 源码一键部署已完成！${PLAIN}"
 echo -e "${GREEN}==========================================================${PLAIN}"
 echo -e "  * 网页控制面板:  ${BLUE}http://${PUBLIC_IP}:${UI_PORT}/${SECRET_PATH}/${PLAIN}"
 if [ -n "$PUBLIC_IPV6" ]; then

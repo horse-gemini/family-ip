@@ -1,4 +1,4 @@
-# AimiliVPN V2.1.5 正式版
+# Family-IP V2.1.5 正式版
 
 V2.1.5 包含 V2.1.4 的全部稳定性、安全性和节点识别改进，并修复正式版重新安装验收中发现的失败切换恢复遗漏。
 
@@ -31,11 +31,11 @@ V2.1.5 包含 V2.1.4 的全部稳定性、安全性和节点识别改进，并�
 
 ## 安装、安全与运维
 
-- 卸载时清理 AimiliVPN 的 sysctl 文件、table 100 路由和全部 table 100 策略规则。
+- 卸载时清理 Family-IP 的 sysctl 文件、table 100 路由和全部 table 100 策略规则。
 - `ui_auth.json` 创建、迁移和保存时使用私有权限 `0600`，并采用安全写入流程。
 - Web 管理端口与代理端口增加双向冲突校验，冲突配置直接拒绝，不再静默改写端口。
 - OpenVPN 启用 `remote-cert-tls server`，验证服务器证书用途并移除相关安全警告。
-- 新增 `AIMILIVPN_NONINTERACTIVE=1` 无人值守安装模式，首次部署不会停在交互提示。
+- 新增 `FAMILY_IP_NONINTERACTIVE=1` 无人值守安装模式，首次部署不会停在交互提示。
 - 安装完成信息只显示实际默认监听的 IPv4 本地代理地址，不再错误提示未启用的 IPv6 地址。
 
 ## 验证与兼容性
@@ -53,7 +53,7 @@ V2.1.5 包含 V2.1.4 的全部稳定性、安全性和节点识别改进，并�
 
 ## 下载与更新
 
-- GitHub Release：`aimilivpn-v2.1.5-linux-source.tar.gz` 和 `sha256sums.txt`。
+- GitHub Release：`family-ip-v2.1.5-linux-source.tar.gz` 和 `sha256sums.txt`。
 - GHCR：`2.1.5`、`2.1`、`latest` 多架构镜像标签。
 
 Python 源码安装更新：

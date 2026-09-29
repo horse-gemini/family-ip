@@ -1,4 +1,4 @@
-# AimiliVPN V2.1.5 正式版验收报告
+# Family-IP V2.1.5 正式版验收报告
 
 测试日期：2026-08-27 至 2026-08-28（Asia/Shanghai）  
 测试版本：`2.1.5`  
@@ -22,7 +22,7 @@ V2.1.5 已通过本地自动化、GitHub Actions 多版本/多架构构建，以
 - Docker `linux/amd64`、`linux/386`、`linux/arm64`、`linux/arm/v7`：分别构建并导入验证通过。
 - GHCR 多架构索引摘要：`sha256:46b8f73ebb93ef308ef5bd51b649ce5030ab19ea7eff984e7525f9e7cb84044a`。
 - GitHub Release：`v2.1.5`，非草稿、非预发布，并为当前 latest。
-- 源码包：`aimilivpn-v2.1.5-linux-source.tar.gz`。
+- 源码包：`family-ip-v2.1.5-linux-source.tar.gz`。
 - 源码包 SHA-256：`e2cbcbb35558c34fed6083047bbb730fc9d43bd3537eb301538a1b01ff7f9363`，下载后与 `sha256sums.txt` 完全一致。
 - Actions 使用 `actions/checkout@v7`、`actions/setup-python@v7` 等当前运行时版本，本次没有 Node.js 20 弃用失败。
 
@@ -40,7 +40,7 @@ V2.1.5 已通过本地自动化、GitHub Actions 多版本/多架构构建，以
 
 两次执行项目自带 `ml uninstall` 后分别确认：
 
-- `/opt/aimilivpn`、`ml`、systemd unit 和 `/etc/sysctl.d/99-aimilivpn.conf` 均不存在。
+- `/opt/family-ip`、`ml`、systemd unit 和 `/etc/sysctl.d/99-family-ip.conf` 均不存在。
 - OpenVPN 进程为 0，`tun0` 不存在。
 - table 100 路由为 0，table 100 策略规则为 0。
 - systemd 返回 inactive，unit 文件不存在。
@@ -48,7 +48,7 @@ V2.1.5 已通过本地自动化、GitHub Actions 多版本/多架构构建，以
 随后严格执行 README 的无人值守 GitHub 安装方式：
 
 ```bash
-AIMILIVPN_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+FAMILY_IP_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
 结果：

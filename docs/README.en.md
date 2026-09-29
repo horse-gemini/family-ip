@@ -1,11 +1,11 @@
 <div align="center">
 
-# AimiliVPN
+# Family-IP
 
 **A VPNGate node manager and HTTP / HTTPS / SOCKS5 proxy gateway for Linux VPS hosts**
 
-[![Release](https://img.shields.io/github/v/release/yzl-job/aimili-vpngate-public?style=flat-square&label=stable&color=16a34a)](https://github.com/yzl-job/aimili-vpngate-public/releases/latest)
-[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/yzl-job/aimili-vpngate-public/pkgs/container/aimili-vpngate-public)
+[![Release](https://img.shields.io/github/v/release/yzl-job/family-ip?style=flat-square&label=stable&color=16a34a)](https://github.com/yzl-job/family-ip/releases/latest)
+[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/yzl-job/family-ip/pkgs/container/family-ip)
 [![License](https://img.shields.io/badge/License-GPL--3.0-334155?style=flat-square)](../LICENSE)
 
 [简体中文](../README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md)
@@ -18,7 +18,7 @@
 
 </div>
 
-AimiliVPN uses Python's standard library to manage VPNGate nodes. It provides node discovery and testing, connection switching, a Web dashboard, and HTTP, HTTPS website proxying, and SOCKS5 access on one local port.
+Family-IP uses Python's standard library to manage VPNGate nodes. It provides node discovery and testing, connection switching, a Web dashboard, and HTTP, HTTPS website proxying, and SOCKS5 access on one local port.
 
 | Item | Default or supported range |
 | --- | --- |
@@ -37,7 +37,7 @@ AimiliVPN uses Python's standard library to manage VPNGate nodes. It provides no
 Run as `root` on a supported Linux VPS:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
 The installer prints the complete Web URL, private path, username, and password. Run `ml` to open the management menu.
@@ -70,15 +70,15 @@ Before purchasing, confirm that the selected plan permits TUN/TAP, OpenVPN, and 
 ### Option 1: Source installer
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
-The installer deploys to `/opt/aimilivpn` and registers a system service.
+The installer deploys to `/opt/family-ip` and registers a system service.
 
 For unattended installation, explicitly skip the first-run prompts and generate the Web path and credentials automatically:
 
 ```bash
-AIMILIVPN_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+FAMILY_IP_NONINTERACTIVE=1 bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
 ```bash
@@ -94,26 +94,26 @@ ml uninstall       # Uninstall
 To inspect the installer first:
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 sudo bash install.sh
 ```
 
-Universal Linux source archives and SHA-256 checksums are available from [GitHub Releases](https://github.com/yzl-job/aimili-vpngate-public/releases/latest). Version changes are documented in the Release Notes.
+Universal Linux source archives and SHA-256 checksums are available from [GitHub Releases](https://github.com/yzl-job/family-ip/releases/latest). Version changes are documented in the Release Notes.
 
 ### Option 2: Docker Compose
 
 The Docker host must provide `/dev/net/tun`, host networking, `NET_ADMIN`, and `NET_RAW`.
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 docker compose pull
 docker compose up -d
-docker logs -f aimilivpn
+docker logs -f family-ip
 ```
 
-Image: `ghcr.io/yzl-job/aimili-vpngate-public:2.1`
+Image: `ghcr.io/yzl-job/family-ip:2.1`
 
 Update:
 
@@ -127,7 +127,7 @@ docker compose up -d
 
 ```bash
 docker run -d \
-  --name aimilivpn \
+  --name family-ip \
   --restart unless-stopped \
   --network host \
   --cap-add NET_ADMIN \
@@ -137,8 +137,8 @@ docker run -d \
   -e UI_PORT=8787 \
   -e LOCAL_PROXY_HOST=127.0.0.1 \
   -e LOCAL_PROXY_PORT=7928 \
-  -v aimilivpn-data:/data \
-  ghcr.io/yzl-job/aimili-vpngate-public:2.1
+  -v family-ip-data:/data \
+  ghcr.io/yzl-job/family-ip:2.1
 ```
 
 </details>
@@ -147,8 +147,8 @@ docker run -d \
 <summary><strong>Build locally when GHCR is unavailable</strong></summary>
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 docker compose build
 docker compose up -d
 ```
@@ -171,7 +171,7 @@ Run `ml status` to recover the URL, or `ml password` to reset credentials.
 Docker users can read the initial Web configuration with:
 
 ```bash
-docker exec aimilivpn cat /data/ui_auth.json
+docker exec family-ip cat /data/ui_auth.json
 ```
 
 Use its `secret_path`, `username`, and `password`, then change them after the first sign-in.
@@ -227,7 +227,7 @@ After the tunnel is established:
 | Website / forum | Announcements and discussion | [339936.xyz](https://339936.xyz) |
 | Telegram group | Real-time community chat | [t.me/arestemple](https://t.me/arestemple) |
 | YouTube tutorial | Installation and usage video | [Watch](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
-| GitHub Issues | Reproducible bugs and feature requests | [Open an issue](https://github.com/yzl-job/aimili-vpngate-public/issues) |
+| GitHub Issues | Reproducible bugs and feature requests | [Open an issue](https://github.com/yzl-job/family-ip/issues) |
 | Email | Bug reports and contact | [yaohunse7@gmail.com](mailto:yaohunse7@gmail.com) |
 
 <a id="legal"></a>
@@ -245,6 +245,6 @@ After the tunnel is established:
 
 <div align="center">
 
-[Stable Release](https://github.com/yzl-job/aimili-vpngate-public/releases/latest) · [Issues](https://github.com/yzl-job/aimili-vpngate-public/issues) · [GPL-3.0 License](../LICENSE)
+[Stable Release](https://github.com/yzl-job/family-ip/releases/latest) · [Issues](https://github.com/yzl-job/family-ip/issues) · [GPL-3.0 License](../LICENSE)
 
 </div>

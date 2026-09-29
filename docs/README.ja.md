@@ -1,11 +1,11 @@
 <div align="center">
 
-# AimiliVPN
+# Family-IP
 
 **Linux VPS 向け VPNGate ノード管理・HTTP / HTTPS / SOCKS5 プロキシゲートウェイ**
 
-[![Release](https://img.shields.io/github/v/release/yzl-job/aimili-vpngate-public?style=flat-square&label=stable&color=16a34a)](https://github.com/yzl-job/aimili-vpngate-public/releases/latest)
-[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/yzl-job/aimili-vpngate-public/pkgs/container/aimili-vpngate-public)
+[![Release](https://img.shields.io/github/v/release/yzl-job/family-ip?style=flat-square&label=stable&color=16a34a)](https://github.com/yzl-job/family-ip/releases/latest)
+[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20386%20%7C%20arm64%20%7C%20armv7-0ea5e9?style=flat-square&logo=docker&logoColor=white)](https://github.com/yzl-job/family-ip/pkgs/container/family-ip)
 [![License](https://img.shields.io/badge/License-GPL--3.0-334155?style=flat-square)](../LICENSE)
 
 [简体中文](../README.md) · [English](README.en.md) · **日本語** · [한국어](README.ko.md)
@@ -18,7 +18,7 @@
 
 </div>
 
-AimiliVPN は Python 標準ライブラリで VPNGate ノードを管理し、ノード取得・テスト、接続切り替え、Web 管理画面、HTTP / HTTPS サイト用プロキシと SOCKS5 を提供します。
+Family-IP は Python 標準ライブラリで VPNGate ノードを管理し、ノード取得・テスト、接続切り替え、Web 管理画面、HTTP / HTTPS サイト用プロキシと SOCKS5 を提供します。
 
 | 項目 | デフォルトまたは対応範囲 |
 | --- | --- |
@@ -36,7 +36,7 @@ AimiliVPN は Python 標準ライブラリで VPNGate ノードを管理し、�
 対応する Linux VPS で `root` として実行します。
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
 完了後、Web 管理画面の URL、専用パス、ユーザー名、パスワードが表示されます。`ml` で管理メニューを開けます。
@@ -69,10 +69,10 @@ bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/
 ### 方法 1：ソースインストーラー
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/aimili-vpngate-public/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/yzl-job/family-ip/main/install.sh)
 ```
 
-`/opt/aimilivpn` に配置し、システムサービスを登録します。
+`/opt/family-ip` に配置し、システムサービスを登録します。
 
 ```bash
 ml                 # 管理メニュー
@@ -87,26 +87,26 @@ ml uninstall       # アンインストール
 事前にスクリプトを確認する場合：
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 sudo bash install.sh
 ```
 
-Linux 共通ソースアーカイブと SHA-256 は [GitHub Releases](https://github.com/yzl-job/aimili-vpngate-public/releases/latest) から取得できます。変更内容は Release Notes に掲載されます。
+Linux 共通ソースアーカイブと SHA-256 は [GitHub Releases](https://github.com/yzl-job/family-ip/releases/latest) から取得できます。変更内容は Release Notes に掲載されます。
 
 ### 方法 2：Docker Compose
 
 Docker ホストには `/dev/net/tun`、host ネットワーク、`NET_ADMIN`、`NET_RAW` が必要です。
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 docker compose pull
 docker compose up -d
-docker logs -f aimilivpn
+docker logs -f family-ip
 ```
 
-イメージ：`ghcr.io/yzl-job/aimili-vpngate-public:2.1`
+イメージ：`ghcr.io/yzl-job/family-ip:2.1`
 
 更新：
 
@@ -120,7 +120,7 @@ docker compose up -d
 
 ```bash
 docker run -d \
-  --name aimilivpn \
+  --name family-ip \
   --restart unless-stopped \
   --network host \
   --cap-add NET_ADMIN \
@@ -130,8 +130,8 @@ docker run -d \
   -e UI_PORT=8787 \
   -e LOCAL_PROXY_HOST=127.0.0.1 \
   -e LOCAL_PROXY_PORT=7928 \
-  -v aimilivpn-data:/data \
-  ghcr.io/yzl-job/aimili-vpngate-public:2.1
+  -v family-ip-data:/data \
+  ghcr.io/yzl-job/family-ip:2.1
 ```
 
 </details>
@@ -140,8 +140,8 @@ docker run -d \
 <summary><strong>GHCR を利用できない場合のローカルビルド</strong></summary>
 
 ```bash
-git clone --branch main --single-branch https://github.com/yzl-job/aimili-vpngate-public.git
-cd aimili-vpngate
+git clone --branch main --single-branch https://github.com/yzl-job/family-ip.git
+cd family-ip
 docker compose build
 docker compose up -d
 ```
@@ -162,7 +162,7 @@ http://VPS_IP:8787/private_path/
 URL は `ml status`、認証情報の再設定は `ml password` を使用します。Docker では次のコマンドで初期設定を確認できます。
 
 ```bash
-docker exec aimilivpn cat /data/ui_auth.json
+docker exec family-ip cat /data/ui_auth.json
 ```
 
 `secret_path`、`username`、`password` を使用し、初回ログイン後に変更してください。
@@ -216,7 +216,7 @@ ssh -N \
 | Web サイト / フォーラム | お知らせと交流 | [339936.xyz](https://339936.xyz) |
 | Telegram | リアルタイム交流 | [t.me/arestemple](https://t.me/arestemple) |
 | YouTube | インストール・利用方法 | [動画を見る](https://www.youtube.com/watch?v=s-ATfXR8BpI) |
-| GitHub Issues | 再現可能な不具合と機能要望 | [Issue を作成](https://github.com/yzl-job/aimili-vpngate-public/issues) |
+| GitHub Issues | 再現可能な不具合と機能要望 | [Issue を作成](https://github.com/yzl-job/family-ip/issues) |
 | メール | 不具合報告と連絡 | [yaohunse7@gmail.com](mailto:yaohunse7@gmail.com) |
 
 <a id="legal"></a>
@@ -234,6 +234,6 @@ ssh -N \
 
 <div align="center">
 
-[Stable Release](https://github.com/yzl-job/aimili-vpngate-public/releases/latest) · [Issues](https://github.com/yzl-job/aimili-vpngate-public/issues) · [GPL-3.0 License](../LICENSE)
+[Stable Release](https://github.com/yzl-job/family-ip/releases/latest) · [Issues](https://github.com/yzl-job/family-ip/issues) · [GPL-3.0 License](../LICENSE)
 
 </div>

@@ -1,5 +1,5 @@
 # ============================================
-#  AimiliVPN .gitignore
+#  Family-IP .gitignore
 # ============================================
 
 # ---- Nuitka 编译产物 ----
@@ -7,11 +7,11 @@ vpngate_manager.build/
 vpngate_manager.dist/
 *.build/
 *.dist/
-aimilivpn
+family-ip
 
 # ---- Debian 打包产物 ----
 *.deb
-aimilivpn_*
+family-ip_*
 
 # ---- Python 缓存 ----
 __pycache__/
@@ -52,7 +52,7 @@ logs/
 # ---- 本地开发文档（不上传 GitHub） ----
 AI开发指令.md
 功能文档.md
-AimiliVPN_Analysis_ZH.md
+Family-IP_Analysis_ZH.md
 
 # ---- 临时和测试文件 ----
 scratch/

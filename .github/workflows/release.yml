@@ -79,14 +79,14 @@ jobs:
           load: true
           platforms: ${{ matrix.platform }}
           build-args: BUILD_VERSION=${{ env.RELEASE_TAG }}
-          tags: aimilivpn-smoke:${{ matrix.slug }}
+          tags: family-ip-smoke:${{ matrix.slug }}
           cache-from: type=gha,scope=smoke-${{ matrix.slug }}
           cache-to: type=gha,mode=max,scope=smoke-${{ matrix.slug }}
       - name: Verify application imports in image
         shell: bash
         run: |
           docker run --rm --platform "${{ matrix.platform }}" \
-            "aimilivpn-smoke:${{ matrix.slug }}" \
+            "family-ip-smoke:${{ matrix.slug }}" \
             python3 -c 'import vpngate_manager as app; print(app.APP_VERSION)'
 
   docker:
@@ -146,7 +146,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          title="AimiliVPN V$(tr -d '\r\n' < VERSION) 正式版"
+          title="Family-IP V$(tr -d '\r\n' < VERSION) 正式版"
           if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${RELEASE_TAG}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"
             gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --title "${title}" --notes-file RELEASE_NOTES.md
