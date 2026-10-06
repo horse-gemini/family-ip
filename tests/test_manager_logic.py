@@ -499,35 +499,28 @@ class ManagerLogicTests(unittest.TestCase):
             [node["id"] for node in ordered],
         )
 
-    def test_us_residential_priority_flags_only_us_home_ip(self) -> None:
-        us_home = manager.us_residential_priority(
-            {"country_short": "us", "ip_type": "Residential"}
-        )
-        us_hosting = manager.us_residential_priority(
-            {"country_short": "US", "ip_type": "hosting"}
-        )
-        jp_home = manager.us_residential_priority(
-            {"country_short": "JP", "ip_type": "residential"}
-        )
+    def test_us_node_priority_flags_only_us_nodes(self) -> None:
+        self.assertEqual(manager.us_node_priority({"country_short": "us", "ip_type": "hosting"}), 0)
+        self.assertEqual(manager.us_node_priority({"country_short": "US", "ip_type": "residential"}), 0)
+        self.assertEqual(manager.us_node_priority({"country_short": "JP", "ip_type": "residential"}), 1)
 
-        self.assertEqual(us_home, 0)
-        self.assertEqual(us_hosting, 1)
-        self.assertEqual(jp_home, 1)
-
-    def test_us_residential_node_wins_over_lower_risk_but_non_us_node(self) -> None:
+    def test_us_node_wins_over_lower_risk_but_non_us_node(self) -> None:
         nodes = [
-            # Lowest risk-control index overall, but not a US residential IP.
+            # Lowest risk-control index overall, but not a US node.
             {"id": "jp-mobile", "probe_status": "available", "country_short": "JP",
              "ip_type": "mobile", "latency_ms": 10, "score": 500},
-            # US residential but slower/riskier — must still come first.
-            {"id": "us-residential", "probe_status": "available", "country_short": "US",
-             "ip_type": "residential", "latency_ms": 300, "score": 100},
+            # US hosting but slower/riskier — must still come first.
+            {"id": "us-hosting", "probe_status": "available", "country_short": "US",
+             "ip_type": "hosting", "latency_ms": 300, "score": 100},
+            # US node that is not available must not outrank available nodes.
+            {"id": "us-down", "probe_status": "unavailable", "country_short": "US",
+             "ip_type": "residential", "latency_ms": 5, "score": 900},
         ]
 
         ordered = manager.sort_all_nodes(nodes)
 
         self.assertEqual(
-            ["us-residential", "jp-mobile"],
+            ["us-hosting", "jp-mobile", "us-down"],
             [node["id"] for node in ordered],
         )
 

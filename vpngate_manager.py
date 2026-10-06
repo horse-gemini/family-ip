@@ -1656,22 +1656,22 @@ def risk_control_index(node: dict[str, Any]) -> int:
     return vpn_utils.compute_risk_control_index(node)
 
 
-def us_residential_priority(node: dict[str, Any]) -> int:
-    """最高优先级规则：优先选择美国（US）家庭（住宅）IP 的节点。
+def us_node_priority(node: dict[str, Any]) -> int:
+    """最高优先级规则：优先选择可用的美国（US）IP 节点。
 
-    返回 0 表示该节点为美国住宅 IP，应最优先选择；返回 1 表示其他节点。
-    该规则优先级高于风控指数、实测延迟与评分，因此作为排序主键使用。
+    返回 0 表示该节点为美国节点，应最优先选择；返回 1 表示其他节点。
+    调用方只在“可用”节点中排序，且该规则优先级高于风控指数、实测延迟与评分，
+    因此作为排序主键使用。
     """
     country_short = str(node.get("country_short") or "").strip().upper()
-    ip_type = str(node.get("ip_type") or "").strip().lower()
-    return 0 if country_short == "US" and ip_type == "residential" else 1
+    return 0 if country_short == "US" else 1
 
 
 def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     available_nodes = sorted(
         [n for n in nodes if n.get("probe_status") == "available" or n.get("active")],
         key=lambda n: (
-            us_residential_priority(n),
+            us_node_priority(n),
             risk_control_index(n),
             parse_int(n.get("latency_ms")) or 999999,
             -parse_int(n.get("score"))
@@ -2207,7 +2207,7 @@ def auto_switch_node(attempt: int = 0) -> None:
         candidates = apply_routing_filters(candidates, ui_cfg)
             
         candidates.sort(key=lambda n: (
-            us_residential_priority(n),
+            us_node_priority(n),
             risk_control_index(n),
             parse_int(n.get("latency_ms")) or 999999,
             -parse_int(n.get("score")),
