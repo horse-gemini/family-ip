@@ -535,6 +535,30 @@ class ManagerLogicTests(unittest.TestCase):
 
         self.assertEqual(["us-slower", "jp-fast", "kr-fast"], [n["id"] for n in ordered])
 
+    def test_auto_switch_probes_untested_us_node_before_choosing_other_country(self) -> None:
+        pool = [
+            {"id": "jp", "country_short": "JP", "ip_type": "mobile", "latency_ms": 10,
+             "score": 5, "probe_status": "available"},
+            {"id": "us", "country_short": "US", "ping": 8, "probe_status": "not_checked"},
+        ]
+        connected: list[str] = []
+
+        def fake_probe(ids, target_available=None):
+            for node in pool:
+                if node["id"] in ids:
+                    node.update(probe_status="available", latency_ms=80)
+            return [{"id": i, "probe_status": "available", "probe_message": "ok"} for i in ids]
+
+        with mock.patch.object(manager, "read_nodes", lambda: [dict(n) for n in pool]), \
+                mock.patch.object(manager, "load_ui_config",
+                                  lambda: {"connection_enabled": True, "routing_mode": "auto"}), \
+                mock.patch.object(manager, "test_multiple_nodes", fake_probe), \
+                mock.patch.object(manager, "log_to_json", lambda *a, **k: None), \
+                mock.patch.object(manager, "connect_node", connected.append):
+            manager.auto_switch_node()
+
+        self.assertEqual(["us"], connected)
+
     def test_background_ip_enrichment_merges_metadata_without_replacing_status(self) -> None:
         nodes = self.write_nodes(2)
         nodes[0]["probe_status"] = "available"

@@ -2235,22 +2235,61 @@ def auto_switch_node(attempt: int = 0) -> None:
         print("[自动切换] 当前处于固定 IP 模式，不进行自动连接或切换。", flush=True)
         return
 
-    # Find the next best available node
-    with lock:
-        nodes = read_nodes()
-        candidates = [
-            n for n in nodes 
-            if n.get("probe_status") == "available" 
+    def collect_ranked_candidates() -> list[dict[str, Any]]:
+        with lock:
+            nodes = read_nodes()
+        available = [
+            n for n in nodes
+            if n.get("probe_status") == "available"
             and not n.get("active")
         ]
-        candidates = apply_routing_filters(candidates, ui_cfg)
-            
-        candidates.sort(key=lambda n: (
+        available = apply_routing_filters(available, ui_cfg)
+        available.sort(key=lambda n: (
             us_node_priority(n),
             risk_control_index(n),
             parse_int(n.get("latency_ms")) or 999999,
             -parse_int(n.get("score")),
         ))
+        return available
+
+    # Find the next best available node
+    candidates = collect_ranked_candidates()
+
+    # 美国节点最高优先：可用候选里没有美国节点时，先实测尚未检测过的美国节点，
+    # 否则它们永远停留在“未检测”，无法被选中。
+    if attempt == 0 and not any(us_node_priority(n) == 0 for n in candidates):
+        with lock:
+            pool = read_nodes()
+        untested_us = [
+            n for n in pool
+            if us_node_priority(n) == 0
+            and not n.get("active")
+            and n.get("probe_status") in ("not_checked", "testing", None, "")
+        ]
+        untested_us = apply_routing_filters(untested_us, ui_cfg, include_unknown_ip_type=True)
+        untested_us.sort(key=probe_priority_key)
+        us_probe_ids = [n["id"] for n in untested_us if n.get("id")][:INITIAL_CONNECT_TEST_LIMIT]
+        if us_probe_ids:
+            log_selection(
+                "VPN",
+                f"可用候选中没有美国节点，先实测 {len(us_probe_ids)} 个未检测的美国节点: "
+                f"{describe_nodes(untested_us, 10)}",
+            )
+            try:
+                us_results = test_multiple_nodes(us_probe_ids)
+                log_selection(
+                    "VPN",
+                    "美国节点实测结果: "
+                    + "; ".join(
+                        f"{r.get('id')}={r.get('probe_status')}({str(r.get('probe_message') or '')[:60]})"
+                        for r in us_results
+                    ),
+                )
+            except Exception as exc:
+                log_selection("VPN", f"实测美国节点时出错: {exc}", "WARNING")
+            candidates = collect_ranked_candidates()
+        else:
+            log_selection("VPN", "节点池中没有可供实测的未检测美国节点", "WARNING")
 
     with lock:
         all_nodes_snapshot = read_nodes()
