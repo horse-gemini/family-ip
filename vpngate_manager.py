@@ -62,6 +62,13 @@ import vpn_utils
 import proxy_server
 import snapshot_utils
 
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
 def env_int(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
     raw = os.environ.get(name)
     try:
@@ -133,6 +140,11 @@ UI_HOST = os.environ.get("UI_HOST", "127.0.0.1")
 # 通配 / 全网监听地址：出现在历史配置中时会被安全收敛为回环地址。
 EXPOSED_UI_HOSTS = {"", "*", "0.0.0.0", "::", "::0", "0.0.0.0.0.0.0.0"}
 UI_PORT = env_int("UI_PORT", 8787, 1, 65535)
+# 周期刷新发现可用的美国节点时，是否从非美国节点主动切换过去（默认开启）。
+PREFER_US_AUTO_SWITCH = env_bool("PREFER_US_AUTO_SWITCH", True)
+# 两次“切换到美国节点”尝试之间的最短间隔，避免美国节点不稳定时来回切换。
+PREFER_US_SWITCH_COOLDOWN_SECONDS = env_int("PREFER_US_SWITCH_COOLDOWN_SECONDS", 1800, 0, 86400)
+last_prefer_us_switch_attempt = 0.0
 INVALID_BACKOFF_SECONDS = env_int("INVALID_BACKOFF_SECONDS", 30 * 60, 1)
 DEPLOYMENT_MODE = os.environ.get("DEPLOYMENT_MODE", "source").strip().lower()
 if DEPLOYMENT_MODE not in {"source", "docker"}:
@@ -2870,6 +2882,11 @@ def maintain_valid_nodes(force: bool = False) -> str:
                         if available_candidates:
                             auto_switch_node()
 
+        try:
+            maybe_switch_to_us_node()
+        except Exception as exc:
+            log_selection("VPN", f"检查是否切换到美国节点时出错: {exc}", "WARNING")
+
         valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
         total_tested = len(fast_results) + len(tested_results)
         message = f"Fetched {len(candidates)} nodes. Tested {total_tested} prioritized non-active nodes."
@@ -2885,6 +2902,67 @@ def maintain_valid_nodes(force: bool = False) -> str:
     finally:
         is_connecting = False
         maintenance_lock.release()
+
+
+def maybe_switch_to_us_node() -> None:
+    """周期刷新后：当前连的不是美国节点、而池中有可用的美国节点时，主动切换过去。"""
+    global last_prefer_us_switch_attempt
+    if not PREFER_US_AUTO_SWITCH:
+        return
+    ui_cfg = load_ui_config()
+    if not ui_cfg.get("connection_enabled", True) or ui_cfg.get("routing_mode", "auto") == "fixed_ip":
+        return
+    if not active_openvpn_running():
+        return
+
+    with lock:
+        nodes = read_nodes()
+    active = next((n for n in nodes if n.get("active")), None)
+    if not active or us_node_priority(active) == 0:
+        return
+
+    us_candidates = [
+        n for n in nodes
+        if n.get("probe_status") == "available"
+        and not n.get("active")
+        and us_node_priority(n) == 0
+    ]
+    us_candidates = apply_routing_filters(us_candidates, ui_cfg)
+    if not us_candidates:
+        log_selection(
+            "VPN",
+            f"当前连接 {describe_node_brief(active)} 不是美国节点，但节点池中暂无可用的美国节点，保持当前连接",
+        )
+        return
+    us_candidates.sort(key=lambda n: (
+        risk_control_index(n),
+        parse_int(n.get("latency_ms")) or 999999,
+        -parse_int(n.get("score")),
+    ))
+    best = us_candidates[0]
+
+    elapsed = time.time() - last_prefer_us_switch_attempt
+    if elapsed < PREFER_US_SWITCH_COOLDOWN_SECONDS:
+        log_selection(
+            "VPN",
+            f"发现可用美国节点 {describe_node_brief(best)}，但距上次切换尝试仅 {int(elapsed)} 秒，"
+            f"冷却 {PREFER_US_SWITCH_COOLDOWN_SECONDS} 秒内暂不切换",
+        )
+        return
+    last_prefer_us_switch_attempt = time.time()
+
+    previous_id = str(active.get("id") or "")
+    log_selection(
+        "VPN",
+        f"发现可用美国节点 {describe_node_brief(best)}(美国可用候选共 {len(us_candidates)} 个)，"
+        f"当前为非美国节点 {describe_node_brief(active)}，按最高优先规则主动切换",
+    )
+    try:
+        connect_node(best["id"])
+        log_selection("VPN", f"已切换到美国节点 {best['id']}")
+    except Exception as exc:
+        log_selection("VPN", f"切换到美国节点 {best['id']} 失败: {exc}", "WARNING")
+        recover_after_manual_connect_failure(previous_id)
 
 
 def collector_loop() -> None:

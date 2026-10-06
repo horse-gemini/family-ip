@@ -559,6 +559,57 @@ class ManagerLogicTests(unittest.TestCase):
 
         self.assertEqual(["us"], connected)
 
+    def _run_prefer_us(self, pool, *, cooldown_elapsed=10**6, connect_error=None):
+        connected: list[str] = []
+        recovered: list[str] = []
+
+        def fake_connect(node_id):
+            if connect_error:
+                raise connect_error
+            connected.append(node_id)
+
+        with mock.patch.object(manager, "read_nodes", lambda: [dict(n) for n in pool]), \
+                mock.patch.object(manager, "load_ui_config",
+                                  lambda: {"connection_enabled": True, "routing_mode": "auto"}), \
+                mock.patch.object(manager, "active_openvpn_running", lambda: True), \
+                mock.patch.object(manager, "log_to_json", lambda *a, **k: None), \
+                mock.patch.object(manager, "connect_node", fake_connect), \
+                mock.patch.object(manager, "recover_after_manual_connect_failure", recovered.append), \
+                mock.patch.object(manager, "last_prefer_us_switch_attempt",
+                                  manager.time.time() - cooldown_elapsed):
+            manager.maybe_switch_to_us_node()
+        return connected, recovered
+
+    def test_prefer_us_switches_from_non_us_active_node(self) -> None:
+        pool = [
+            {"id": "jp", "country_short": "JP", "active": True, "probe_status": "available"},
+            {"id": "us", "country_short": "US", "probe_status": "available", "latency_ms": 90},
+        ]
+        connected, _ = self._run_prefer_us(pool)
+        self.assertEqual(["us"], connected)
+
+    def test_prefer_us_keeps_us_active_node_and_respects_cooldown(self) -> None:
+        us_active = [
+            {"id": "us1", "country_short": "US", "active": True, "probe_status": "available"},
+            {"id": "us2", "country_short": "US", "probe_status": "available"},
+        ]
+        self.assertEqual([], self._run_prefer_us(us_active)[0])
+
+        jp_active = [
+            {"id": "jp", "country_short": "JP", "active": True, "probe_status": "available"},
+            {"id": "us", "country_short": "US", "probe_status": "available"},
+        ]
+        self.assertEqual([], self._run_prefer_us(jp_active, cooldown_elapsed=5)[0])
+
+    def test_prefer_us_recovers_previous_node_when_switch_fails(self) -> None:
+        pool = [
+            {"id": "jp", "country_short": "JP", "active": True, "probe_status": "available"},
+            {"id": "us", "country_short": "US", "probe_status": "available"},
+        ]
+        connected, recovered = self._run_prefer_us(pool, connect_error=RuntimeError("boom"))
+        self.assertEqual([], connected)
+        self.assertEqual(["jp"], recovered)
+
     def test_background_ip_enrichment_merges_metadata_without_replacing_status(self) -> None:
         nodes = self.write_nodes(2)
         nodes[0]["probe_status"] = "available"
