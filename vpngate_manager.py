@@ -1141,6 +1141,13 @@ def fetch_candidates() -> list[dict[str, Any]]:
                 mirror_generated_at, mirror_freshness = read_mirror_freshness()
             source_note = f"，{mirror_freshness}" if mirror_freshness else ""
 
+            log_selection(
+                "Main",
+                f"节点源 {source_name}: 原始候选 {len(candidates)} 个(其中美国 {count_us_nodes(candidates)} 个)，"
+                f"国家范围筛选后 {len(filtered_candidates)} 个(其中美国 {count_us_nodes(filtered_candidates)} 个)，"
+                f"发现国家范围={discovery_countries or '全部'}；"
+                f"美国节点: {describe_nodes([n for n in candidates if us_node_priority(n) == 0], 8)}",
+            )
             set_state(
                 last_fetch_at=time.time(),
                 last_fetch_status="ok",
@@ -1665,6 +1672,35 @@ def us_node_priority(node: dict[str, Any]) -> int:
     """
     country_short = str(node.get("country_short") or "").strip().upper()
     return 0 if country_short == "US" else 1
+
+
+def describe_node_brief(node: dict[str, Any]) -> str:
+    """日志用：单个节点的简要描述（国家/类型/延迟/评分/状态）。"""
+    return (
+        f"{node.get('id')}"
+        f"[{str(node.get('country_short') or '?').upper()}"
+        f"/{node.get('ip_type') or '未知类型'}"
+        f"/ping={node.get('ping')}"
+        f"/lat={node.get('latency_ms')}"
+        f"/score={node.get('score')}"
+        f"/{node.get('probe_status') or 'unknown'}]"
+    )
+
+
+def describe_nodes(nodes: list[dict[str, Any]], limit: int = 12) -> str:
+    items = [describe_node_brief(n) for n in nodes[:limit]]
+    more = f" …另有 {len(nodes) - limit} 个" if len(nodes) > limit else ""
+    return ", ".join(items) + more if items else "(空)"
+
+
+def count_us_nodes(nodes: list[dict[str, Any]]) -> int:
+    return sum(1 for n in nodes if us_node_priority(n) == 0)
+
+
+def log_selection(module: str, message: str, level: str = "INFO") -> None:
+    """同时输出到控制台与 Web 日志，用于排查节点选择结果。"""
+    print(f"[节点选择] {message}", flush=True)
+    log_to_json(level, module, f"[节点选择] {message}")
 
 
 def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2216,8 +2252,36 @@ def auto_switch_node(attempt: int = 0) -> None:
             -parse_int(n.get("score")),
         ))
 
+    with lock:
+        all_nodes_snapshot = read_nodes()
+    us_all = [n for n in all_nodes_snapshot if us_node_priority(n) == 0]
+    us_status: dict[str, int] = {}
+    for n in us_all:
+        key = str(n.get("probe_status") or "unknown") + ("(当前活动)" if n.get("active") else "")
+        us_status[key] = us_status.get(key, 0) + 1
+    log_selection(
+        "VPN",
+        f"自动选择(第 {attempt + 1} 次尝试): 路由模式={routing_mode}, 强制国家={target_country or '无'}, "
+        f"出口IP类型={ui_cfg.get('routing_ip_type', 'all')}；"
+        f"可用候选 {len(candidates)} 个(其中美国 {count_us_nodes(candidates)} 个)；"
+        f"节点池美国节点共 {len(us_all)} 个，状态分布={us_status or '无'}",
+    )
     if candidates:
+        for rank, n in enumerate(candidates[:10], 1):
+            log_selection(
+                "VPN",
+                f"排名#{rank} {describe_node_brief(n)} "
+                f"美国优先键={us_node_priority(n)} 风控指数={risk_control_index(n)} "
+                f"延迟={n.get('latency_ms')} 评分={n.get('score')}",
+            )
         next_node = candidates[0]
+        if us_node_priority(next_node) != 0:
+            log_selection(
+                "VPN",
+                f"本次选中的 {next_node['id']} 不是美国节点：可用候选中没有美国节点"
+                f"(美国节点状态={us_status or '节点池中没有美国节点'})",
+                "WARNING",
+            )
         msg = f"当前连接已失效或代理连通性检测失败，正在自动切换至最佳备用节点: {next_node['id']}"
         print(f"[自动切换] {msg}", flush=True)
         log_to_json("INFO", "VPN", msg)
@@ -2281,12 +2345,11 @@ def connect_node(node_id: str) -> str:
             active_node_latency="正在连接",
             last_check_message=f"正在初始化连接配置: {node_id}",
         )
-        log_to_json("INFO", "VPN", f"开始连接节点: {node_id}")
-
         nodes = read_nodes()
         node = next((item for item in nodes if item.get("id") == node_id), None)
         if not node:
             raise ValueError(f"Node not found: {node_id}")
+        log_to_json("INFO", "VPN", f"开始连接节点: {describe_node_brief(node)}")
 
         with lock:
             if active_openvpn_running():
@@ -2489,6 +2552,14 @@ def maintain_valid_nodes(force: bool = False) -> str:
     try:
         # A forced refresh must not tear down a healthy tunnel. It only forces
         # the node-pool maintenance path below.
+        if active_openvpn_running():
+            with lock:
+                active_info = next((n for n in read_nodes() if n.get("active")), None)
+            log_selection(
+                "Main",
+                "当前已有正在运行的隧道，本轮刷新只维护节点池、不会主动切换节点: "
+                + (describe_node_brief(active_info) if active_info else str(active_openvpn_node_id or "未知")),
+            )
         if not active_openvpn_running():
             ui_cfg = load_ui_config()
             routing_mode = ui_cfg.get("routing_mode", "auto")
@@ -2602,6 +2673,17 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     n["id"] for n in fast_candidates
                     if n.get("id")
                 ][:INITIAL_CONNECT_TEST_LIMIT]
+                fast_selected = [n for n in fast_candidates if n.get("id") in set(fast_test_ids)]
+                log_selection(
+                    "Main",
+                    f"快速首连: 路由模式={ui_cfg.get('routing_mode', 'auto')}, 强制国家={ui_cfg.get('force_country') or '无'}, "
+                    f"出口IP类型={ui_cfg.get('routing_ip_type', 'all')}；"
+                    f"过滤后候选 {len(fast_candidates)} 个(其中美国 {count_us_nodes(fast_candidates)} 个)，"
+                    f"本轮探测上限 {INITIAL_CONNECT_TEST_LIMIT}，实际选中 {len(fast_selected)} 个"
+                    f"(其中美国 {count_us_nodes(fast_selected)} 个): {describe_nodes(fast_selected, 15)}",
+                )
+                if fast_candidates and not count_us_nodes(fast_candidates):
+                    log_selection("Main", "快速首连: 过滤后的候选中没有任何美国节点，将选择其他国家节点", "WARNING")
 
             if fast_test_ids:
                 msg = f"首次快速连接模式：优先测试 {len(fast_test_ids)} 个高优先级节点，发现可用节点后立即连接"
@@ -2609,6 +2691,17 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 log_to_json("INFO", "Main", msg)
                 set_state(is_connecting=True, last_check_message=msg)
                 fast_results = test_multiple_nodes(fast_test_ids, target_available=TARGET_VALID_NODES)
+                log_selection(
+                    "Main",
+                    "快速首连探测结果: "
+                    + (
+                        "; ".join(
+                            f"{r.get('id')}={r.get('probe_status')}({str(r.get('probe_message') or '')[:60]})"
+                            for r in fast_results
+                        )
+                        or "(无结果)"
+                    ),
+                )
                 systemic_probe_failure = next(
                     (
                         str(result.get("probe_message") or "")
@@ -2665,6 +2758,11 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 to_test.sort(key=probe_priority_key)
                 to_test_ids = [n["id"] for n in to_test]
 
+            log_selection(
+                "Main",
+                f"周期检测: 待检测 {len(to_test)} 个(其中美国 {count_us_nodes(to_test)} 个)，"
+                f"探测顺序前 15 个: {describe_nodes(to_test, 15)}",
+            )
             msg = f"开始对列表中所有候选节点进行周期连通性与延迟测试，待检测节点共 {len(to_test_ids)} 个"
             print(f"[周期检测] {msg}", flush=True)
             log_to_json("INFO", "Main", msg)
