@@ -1801,9 +1801,12 @@ def country_matches(
         return str(node_country_short or "").strip().upper() == target_upper
     return normalized_country_name(node_country).casefold() == normalized_country_name(target).casefold()
 
-def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int]:
+def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int, int]:
+    # 美国节点最先探测，否则首轮有限的探测名额可能全被低 Ping 的其他国家占满，
+    # 导致“美国节点最高优先”规则没有机会生效。
     ping = parse_int(node.get("ping")) or 999999
     return (
+        us_node_priority(node),
         ping,
         -parse_int(node.get("score")),
         -parse_int(node.get("speed")),

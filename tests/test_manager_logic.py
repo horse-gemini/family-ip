@@ -524,6 +524,17 @@ class ManagerLogicTests(unittest.TestCase):
             [node["id"] for node in ordered],
         )
 
+    def test_probe_priority_puts_us_nodes_before_lower_ping_nodes(self) -> None:
+        nodes = [
+            {"id": "jp-fast", "country_short": "JP", "ping": 2, "score": 900},
+            {"id": "kr-fast", "country_short": "KR", "ping": 3, "score": 900},
+            {"id": "us-slower", "country_short": "US", "ping": 40, "score": 100},
+        ]
+
+        ordered = sorted(nodes, key=manager.probe_priority_key)
+
+        self.assertEqual(["us-slower", "jp-fast", "kr-fast"], [n["id"] for n in ordered])
+
     def test_background_ip_enrichment_merges_metadata_without_replacing_status(self) -> None:
         nodes = self.write_nodes(2)
         nodes[0]["probe_status"] = "available"
