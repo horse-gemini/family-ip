@@ -1069,6 +1069,7 @@ def rows_to_candidates(
     blacklist: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    skipped_blacklisted: list[tuple[dict[str, Any], dict[str, Any]]] = []
     seen_ips: set[str] = set()
     for row in rows[:MAX_SCAN_ROWS]:
         ip = row.get("IP", "")
@@ -1084,9 +1085,22 @@ def rows_to_candidates(
             continue
         entry = blacklist.get(node["id"])
         if entry and float(entry.get("until", 0) or 0) > time.time():
+            skipped_blacklisted.append((node, entry))
             continue
         candidates.append(node)
         seen_ips.add(ip)
+    if skipped_blacklisted:
+        us_skipped = [(n, e) for n, e in skipped_blacklisted if us_node_priority(n) == 0]
+        detail = "; ".join(
+            f"{n.get('id')} 原因={str(e.get('reason') or '')[:60]} "
+            f"剩余{max(0, int(float(e.get('until', 0) or 0) - time.time()))}秒"
+            for n, e in us_skipped
+        )
+        log_selection(
+            "Main",
+            f"黑名单跳过 {len(skipped_blacklisted)} 个节点(其中美国 {len(us_skipped)} 个)"
+            + (f": {detail}" if detail else ""),
+        )
     return candidates
 
 def filter_candidates_by_discovery_countries(
@@ -2154,6 +2168,17 @@ def test_multiple_nodes(node_ids: list[str], target_available: int | None = None
                 set_state(last_check_message=message)
                 break
                 
+    us_probe_lines = [
+        f"{n.get('id')}={updated_nodes_map[str(n.get('id'))].get('probe_status')}"
+        f"({str(updated_nodes_map[str(n.get('id'))].get('probe_message') or '')[:80]})"
+        for n in to_test
+        if us_node_priority(n) == 0 and str(n.get("id")) in updated_nodes_map
+    ]
+    if us_probe_lines:
+        log_selection("VPN", "本轮探测的美国节点结果: " + "; ".join(us_probe_lines))
+    elif to_test:
+        log_selection("VPN", f"本轮探测了 {len(updated_nodes_map)}/{len(to_test)} 个节点，其中没有美国节点")
+
     # 批量查询并丰富可用节点的地理及 ISP 信息，防止并发时被定位 API 接口限流
     successful_nodes = [res for res in updated_nodes_map.values() if res.get("probe_status") == "available"]
     if successful_nodes:
