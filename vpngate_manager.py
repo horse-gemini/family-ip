@@ -1455,6 +1455,8 @@ def kill_existing_openvpn_processes() -> None:
             print(f"[Cleanup] Terminated Family-IP OpenVPN processes: {killed_pids}", flush=True)
     except Exception as e:
         print(f"[Cleanup Error] Failed to kill existing OpenVPN processes: {e}", flush=True)
+    # 即使没有残留进程，tun0 也可能作为持久化网卡留在内核里(导致 EBUSY)，兜底删除
+    delete_tun_device("tun0")
 
 def update_handshake_status(line_lower: str) -> None:
     status_map = {
@@ -1640,6 +1642,31 @@ def cleanup_policy_routing() -> None:
     except Exception:
         pass
 
+def delete_tun_device(dev: str = "tun0") -> None:
+    """删除残留的 TUN 虚拟网卡。
+
+    OpenVPN 进程被异常终止(SIGKILL、容器强杀)后，tun0 可能作为持久化设备
+    残留在内核里。此时进程已经没了，但再次创建同名网卡会报
+    `TUNSETIFF tunX: Device or resource busy (errno=16)`。仅靠 kill 进程无法恢复，
+    必须显式删除网卡。这里在每次 teardown 和启动清理时兜底删除，忽略"设备不存在"。
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    removed = False
+    try:
+        result = subprocess.run(["ip", "link", "delete", dev], capture_output=True, timeout=3)
+        removed = result.returncode == 0
+    except Exception:
+        pass
+    if not removed:
+        # 回退：某些环境没有 iproute2，或网卡由 openvpn --mktun 创建
+        try:
+            subprocess.run(["openvpn", "--rmtun", "--dev", dev], capture_output=True, timeout=3)
+        except Exception:
+            pass
+    if removed:
+        print(f"[cleanup_tun] Removed leftover TUN device {dev}", flush=True)
+
 def stop_active_openvpn() -> None:
     global active_openvpn_process, active_openvpn_node_id
     with lock:
@@ -1654,7 +1681,9 @@ def stop_active_openvpn() -> None:
         stop_process(active_openvpn_process)
         active_openvpn_process = None
         active_openvpn_node_id = ""
-        
+        # 进程停了之后清掉可能残留的 tun0，避免下次重连撞到 EBUSY
+        delete_tun_device("tun0")
+
         if config_to_delete:
             try:
                 path = Path(config_to_delete)

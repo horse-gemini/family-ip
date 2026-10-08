@@ -44,7 +44,6 @@ SAFE_DIRECTIVES = {
     "mute",
     "nobind",
     "persist-key",
-    "persist-tun",
     "ping",
     "ping-restart",
     "ping-timer-rem",
