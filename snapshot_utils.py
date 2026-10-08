@@ -44,6 +44,10 @@ SAFE_DIRECTIVES = {
     "mute",
     "nobind",
     "persist-key",
+    # persist-tun 必须保留在白名单内：净化器遇到未列入的指令会整条拒绝配置，
+    # 而 VPNGate 的配置普遍带 persist-tun，移除会导致所有节点被判无效。
+    # 它残留 tun 设备的副作用已由 delete_tun_device() 在 teardown/启动时兜底清理。
+    "persist-tun",
     "ping",
     "ping-restart",
     "ping-timer-rem",
