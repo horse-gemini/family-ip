@@ -105,6 +105,8 @@ class ManagerLogicTests(unittest.TestCase):
         manager.pending_connection_node_id = ""
         # Mirror harvesting is throttled off by default; tests that cover it re-arm it.
         manager.last_us_mirror_harvest = manager.time.time()
+        manager.upgrade_attempt_times.clear()
+        manager.last_prefer_us_switch_attempt = 0.0
         manager.consecutive_proxy_failures = 0
         manager.last_proxy_failure_node_id = ""
         manager.background_refill_thread = None
@@ -628,13 +630,15 @@ class ManagerLogicTests(unittest.TestCase):
 
         self.assertEqual(["us"], connected)
 
-    def _run_prefer_us(self, pool, *, cooldown_elapsed=10**6, connect_error=None):
+    def _run_prefer_us(self, pool, *, cooldown_elapsed=10**6, connect_error=None, failing_ids=()):
         connected: list[str] = []
         recovered: list[str] = []
 
         def fake_connect(node_id):
             if connect_error:
                 raise connect_error
+            if node_id in failing_ids:
+                raise RuntimeError(f"目标节点预检失败，已保留当前连接: {node_id}")
             connected.append(node_id)
 
         with mock.patch.object(manager, "read_nodes", lambda: [dict(n) for n in pool]), \
@@ -646,7 +650,7 @@ class ManagerLogicTests(unittest.TestCase):
                 mock.patch.object(manager, "recover_after_manual_connect_failure", recovered.append), \
                 mock.patch.object(manager, "last_prefer_us_switch_attempt",
                                   manager.time.time() - cooldown_elapsed):
-            manager.maybe_switch_to_us_node()
+            manager.maybe_switch_to_better_node()
         return connected, recovered
 
     def test_prefer_us_switches_from_non_us_active_node(self) -> None:
@@ -668,7 +672,15 @@ class ManagerLogicTests(unittest.TestCase):
             {"id": "jp", "country_short": "JP", "active": True, "probe_status": "available"},
             {"id": "us", "country_short": "US", "probe_status": "available"},
         ]
-        self.assertEqual([], self._run_prefer_us(jp_active, cooldown_elapsed=5)[0])
+        # A node that was already tried recently is not retried during its cooldown...
+        manager.upgrade_attempt_times["us"] = manager.time.time() - 5
+        self.assertEqual([], self._run_prefer_us(jp_active)[0])
+
+        # ...but a newly found US node is switched to at once, even right after
+        # another upgrade attempt: tier upgrades have no global cooldown.
+        jp_active.append({"id": "us-new", "country_short": "US", "probe_status": "available"})
+        self.assertEqual(["us-new"], self._run_prefer_us(jp_active, cooldown_elapsed=5)[0])
+        self.assertIn("us-new", manager.upgrade_attempt_times)
 
     def test_prefer_us_upgrades_from_us_hosting_to_us_residential(self) -> None:
         pool = [
@@ -701,6 +713,91 @@ class ManagerLogicTests(unittest.TestCase):
         )
         self.assertEqual([], connected)
         self.assertEqual([], recovered)
+        self.assertNotIn("us", manager.upgrade_attempt_times)
+
+    def test_upgrade_tries_next_target_when_preflight_fails_without_interruption(self) -> None:
+        pool = [
+            {"id": "jp", "country_short": "JP", "active": True, "probe_status": "available"},
+            {"id": "us-home-1", "country_short": "US", "probe_status": "available", "latency_ms": 10,
+             "ip_type": "residential", "ip_type_confidence": "medium"},
+            {"id": "us-home-2", "country_short": "US", "probe_status": "available", "latency_ms": 90,
+             "ip_type": "residential", "ip_type_confidence": "medium"},
+        ]
+        connected, recovered = self._run_prefer_us(pool, failing_ids=("us-home-1",))
+        self.assertEqual(["us-home-2"], connected)
+        self.assertEqual(["jp"], recovered)
+
+    def test_upgrade_skips_blacklisted_target(self) -> None:
+        pool = [
+            {"id": "jp", "country_short": "JP", "active": True, "probe_status": "available"},
+            {"id": "us", "country_short": "US", "probe_status": "available"},
+        ]
+        manager.mark_blacklisted(pool[1], "代理连通性检测失败")
+        self.assertEqual([], self._run_prefer_us(pool)[0])
+
+    def test_quality_upgrade_switches_to_clearly_cleaner_node_in_same_tier(self) -> None:
+        flagged = {"id": "jp-flagged", "country_short": "JP", "active": True, "probe_status": "available",
+                   "ip_type": "residential", "ip_type_confidence": "medium",
+                   "is_proxy": True, "is_abuser": True}
+        pool = [
+            flagged,
+            # Only one proxy flag better: not worth an exit-IP change.
+            {"id": "jp-slightly", "country_short": "JP", "probe_status": "available", "latency_ms": 5,
+             "ip_type": "residential", "ip_type_confidence": "medium", "is_abuser": True},
+            {"id": "jp-clean", "country_short": "JP", "probe_status": "available", "latency_ms": 200,
+             "ip_type": "residential", "ip_type_confidence": "medium"},
+            # Unknown type is never treated as "cleaner".
+            {"id": "jp-untyped", "country_short": "JP", "probe_status": "available", "latency_ms": 1},
+        ]
+        self.assertEqual(["jp-clean"], self._run_prefer_us(pool)[0])
+
+        # Quality-only switches are rate limited by the cooldown.
+        manager.upgrade_attempt_times.clear()
+        self.assertEqual([], self._run_prefer_us(pool, cooldown_elapsed=5)[0])
+
+        # A marginal gain alone never triggers a switch.
+        self.assertEqual([], self._run_prefer_us([flagged, pool[1]])[0])
+
+        with mock.patch.object(manager, "QUALITY_UPGRADE_MIN_GAIN", 0):
+            self.assertEqual([], self._run_prefer_us(pool)[0])
+
+    def test_quality_upgrade_needs_known_quality_of_active_node(self) -> None:
+        pool = [
+            {"id": "jp-untyped", "country_short": "JP", "active": True, "probe_status": "available"},
+            {"id": "jp-clean", "country_short": "JP", "probe_status": "available",
+             "ip_type": "mobile", "ip_type_confidence": "high"},
+        ]
+        self.assertEqual([], self._run_prefer_us(pool)[0])
+
+    def test_probe_priority_prefers_cleaner_nodes_within_the_same_group(self) -> None:
+        nodes = [
+            {"id": "jp-dc-fast", "country_short": "JP", "ping": 1, "ip_type": "hosting"},
+            {"id": "jp-untyped", "country_short": "JP", "ping": 2},
+            {"id": "jp-home-abuser", "country_short": "JP", "ping": 3,
+             "ip_type": "residential", "is_abuser": True},
+            {"id": "jp-home-clean", "country_short": "JP", "ping": 80, "ip_type": "residential"},
+        ]
+
+        ordered = sorted(nodes, key=manager.probe_priority_key)
+
+        self.assertEqual(
+            ["jp-home-clean", "jp-home-abuser", "jp-untyped", "jp-dc-fast"],
+            [n["id"] for n in ordered],
+        )
+
+    def test_ip_quality_score_is_monotone_with_risk_index(self) -> None:
+        clean_mobile = {"ip_type": "mobile"}
+        clean_home = {"ip_type": "residential"}
+        flagged_home = {"ip_type": "residential", "is_proxy": True, "is_vpn": True, "is_abuser": True}
+        hosting = {"ip_type": "hosting"}
+        worst = {"ip_type": "hosting", "is_tor": True, "is_abuser": True, "is_vpn": True,
+                 "is_proxy": True, "abuser_score": 1}
+        scores = [manager.ip_quality_score(n) for n in (clean_mobile, clean_home, flagged_home, hosting, worst)]
+        self.assertEqual(100, scores[0])
+        self.assertEqual(0, scores[-1])
+        self.assertEqual(sorted(scores, reverse=True), scores)
+        self.assertEqual(len(set(scores)), len(scores))
+        self.assertIsNone(manager.ip_quality_score({"id": "untyped"}))
 
     def test_prefer_us_recovers_previous_node_when_switch_fails(self) -> None:
         pool = [
@@ -1744,7 +1841,7 @@ class ManagerLogicTests(unittest.TestCase):
         with (
             mock.patch.object(manager, "fetch_candidates", return_value=fresh),
             mock.patch.object(manager, "test_multiple_nodes", return_value=[]),
-            mock.patch.object(manager, "maybe_switch_to_us_node"),
+            mock.patch.object(manager, "maybe_switch_to_better_node"),
             mock.patch.object(manager, "log_to_json"),
         ):
             manager.maintain_valid_nodes()
@@ -2034,6 +2131,220 @@ class ManagerLogicTests(unittest.TestCase):
         with mock.patch.object(manager, "US_NODE_RETENTION_HOURS", 0):
             candidates = self._fetch_with_sources([("198.51.100.10", "Japan", "JP")])
         self.assertEqual(["198.51.100.10"], [n["ip"] for n in candidates])
+
+
+    # ---- US residential scout: background probing + switch as soon as one works ----
+
+    JP_ACTIVE = {"id": "jp", "ip": "198.51.100.10", "country_short": "JP", "active": True,
+                 "probe_status": "available", "ip_type": "residential", "ip_type_confidence": "medium"}
+
+    def _run_scout(self, *, official_rows=None, probe_ok=(), residential_ips=(), ui_cfg=None,
+                   tunnel_running=True):
+        """Run one scout round against the file-backed node list; return what it did."""
+        calls = {"fetched": 0, "probed": [], "connected": []}
+
+        def fake_fetch(url, verify_ssl=True, **kwargs):
+            calls["fetched"] += 1
+            if official_rows is None:
+                raise OSError("offline")
+            return valid_snapshot_rows(official_rows)
+
+        def fake_enrich(only_ids=None):
+            nodes = manager.read_nodes()
+            for node in nodes:
+                if only_ids is None or node.get("id") in only_ids:
+                    home = node.get("ip") in residential_ips
+                    node["ip_type"] = "residential" if home else "hosting"
+                    node["ip_type_confidence"] = "medium" if home else "high"
+            manager.write_json(manager.NODES_FILE, nodes)
+            return len(nodes)
+
+        def fake_probe(node_ids, target_available=None):
+            calls["probed"].extend(node_ids)
+            nodes = manager.read_nodes()
+            results = []
+            for node in nodes:
+                if node.get("id") in node_ids:
+                    status = "available" if node.get("ip") in probe_ok else "unavailable"
+                    node.update(probe_status=status, probed_at=manager.time.time(), latency_ms=50)
+                    results.append({"id": node["id"], "probe_status": status, "probe_message": ""})
+            manager.write_json(manager.NODES_FILE, nodes)
+            return results
+
+        def fake_connect(node_id):
+            calls["connected"].append(node_id)
+            nodes = manager.read_nodes()
+            for node in nodes:
+                node["active"] = node.get("id") == node_id
+            manager.write_json(manager.NODES_FILE, nodes)
+
+        config = {"connection_enabled": True, "routing_mode": "auto"}
+        config.update(ui_cfg or {})
+        with (
+            mock.patch.object(manager, "fetch_api_text_with_deadline", fake_fetch),
+            mock.patch.object(manager, "enrich_stored_nodes", fake_enrich),
+            mock.patch.object(manager, "test_multiple_nodes", fake_probe),
+            mock.patch.object(manager, "connect_node", fake_connect),
+            mock.patch.object(manager, "load_ui_config", lambda: dict(config)),
+            mock.patch.object(manager, "active_openvpn_running", lambda: tunnel_running),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            calls["message"] = manager.run_us_scout_once()
+        return calls
+
+    def test_scout_finds_probes_and_switches_to_us_residential_node(self) -> None:
+        manager.write_json(manager.NODES_FILE, [dict(self.JP_ACTIVE)])
+
+        calls = self._run_scout(
+            official_rows=[("198.51.100.11", "Japan", "JP"),
+                           ("203.0.113.50", "United States", "US"),
+                           ("203.0.113.51", "United States", "US")],
+            residential_ips={"203.0.113.51"},
+            probe_ok={"203.0.113.50", "203.0.113.51"},
+        )
+
+        us_home = "US_203.0.113.51_1194_udp"
+        # Both US nodes were added to the list and probed, the residential one first...
+        self.assertEqual([us_home, "US_203.0.113.50_1194_udp"], calls["probed"])
+        # ...and the residential one wins over the equally available US hosting node.
+        self.assertEqual([us_home], calls["connected"])
+        self.assertIn(us_home, calls["message"])
+        self.assertIn("美国家宽", manager.get_state().get("us_scout_message", ""))
+        # Non-US rows from the scout's fetch are not added: the scout only collects US nodes.
+        self.assertEqual(
+            {"198.51.100.10", "203.0.113.50", "203.0.113.51"},
+            {n["ip"] for n in manager.read_nodes()},
+        )
+
+        # Now on US residential: the next round has nothing to do and does not even fetch.
+        idle = self._run_scout(official_rows=[("203.0.113.52", "United States", "US")])
+        self.assertEqual((0, [], []), (idle["fetched"], idle["probed"], idle["connected"]))
+
+    def test_scout_keeps_current_connection_when_no_us_node_works(self) -> None:
+        manager.write_json(manager.NODES_FILE, [dict(self.JP_ACTIVE)])
+
+        calls = self._run_scout(
+            official_rows=[("203.0.113.50", "United States", "US")],
+            residential_ips={"203.0.113.50"},
+        )
+
+        self.assertEqual(["US_203.0.113.50_1194_udp"], calls["probed"])
+        self.assertEqual([], calls["connected"])
+        # A node that just failed is not hammered again in the next round.
+        again = self._run_scout(official_rows=[("203.0.113.50", "United States", "US")])
+        self.assertEqual([], again["probed"])
+
+    def test_scout_works_from_the_local_pool_when_sources_are_down(self) -> None:
+        manager.write_json(manager.NODES_FILE, [
+            dict(self.JP_ACTIVE),
+            {"id": "us-home", "ip": "203.0.113.60", "country_short": "US", "probe_status": "unavailable",
+             "probed_at": manager.time.time() - manager.US_SCOUT_RETRY_UNAVAILABLE_SECONDS - 5,
+             "ip_type": "residential", "ip_type_confidence": "medium"},
+        ])
+
+        calls = self._run_scout(official_rows=None, probe_ok={"203.0.113.60"})
+
+        self.assertEqual(["us-home"], calls["probed"])
+        self.assertEqual(["us-home"], calls["connected"])
+
+    def test_scout_switches_to_fresh_available_node_without_reprobing(self) -> None:
+        manager.write_json(manager.NODES_FILE, [
+            dict(self.JP_ACTIVE),
+            {"id": "us-home", "ip": "203.0.113.60", "country_short": "US", "probe_status": "available",
+             "probed_at": manager.time.time() - 10,
+             "ip_type": "residential", "ip_type_confidence": "medium"},
+        ])
+
+        calls = self._run_scout(official_rows=[("198.51.100.11", "Japan", "JP")])
+
+        self.assertEqual([], calls["probed"])
+        self.assertEqual(["us-home"], calls["connected"])
+
+    def test_scout_stays_out_of_the_way(self) -> None:
+        us_home = {"id": "us-home", "ip": "203.0.113.60", "country_short": "US",
+                   "probe_status": "available", "probed_at": manager.time.time() - 10,
+                   "ip_type": "residential", "ip_type_confidence": "medium"}
+        manager.write_json(manager.NODES_FILE, [dict(self.JP_ACTIVE), us_home])
+        rows = [("203.0.113.50", "United States", "US")]
+
+        def assert_idle(calls):
+            self.assertEqual((0, [], []), (calls["fetched"], calls["probed"], calls["connected"]))
+
+        # No tunnel: connecting is the collector's job.
+        assert_idle(self._run_scout(official_rows=rows, tunnel_running=False))
+        # The user excluded the US or pinned another country / a fixed node.
+        assert_idle(self._run_scout(official_rows=rows, ui_cfg={"discovery_countries": ["JP", "KR"]}))
+        assert_idle(self._run_scout(
+            official_rows=rows, ui_cfg={"routing_mode": "fixed_region", "force_country": "JP"}))
+        assert_idle(self._run_scout(official_rows=rows, ui_cfg={"routing_mode": "fixed_ip"}))
+        assert_idle(self._run_scout(official_rows=rows, ui_cfg={"connection_enabled": False}))
+        # Node maintenance is already probing US nodes.
+        self.assertTrue(manager.maintenance_lock.acquire(blocking=False))
+        try:
+            assert_idle(self._run_scout(official_rows=rows))
+        finally:
+            manager.maintenance_lock.release()
+        with mock.patch.object(manager, "PREFER_US_AUTO_SWITCH", False):
+            assert_idle(self._run_scout(official_rows=rows))
+
+        # Pinning the US keeps the scout working.
+        calls = self._run_scout(
+            official_rows=rows, ui_cfg={"routing_mode": "fixed_region", "force_country": "US"},
+            tunnel_running=True)
+        self.assertEqual(["us-home"], calls["connected"])
+
+    def test_scout_targets_only_nodes_that_would_be_an_upgrade(self) -> None:
+        now = manager.time.time()
+        home = {"country_short": "US", "ip_type": "residential", "ip_type_confidence": "medium"}
+        nodes = [
+            {"id": "us-home-new", "ping": 50, "probe_status": "not_checked", **home},
+            {"id": "us-home-fresh-ok", "probe_status": "available", "probed_at": now - 10, **home},
+            {"id": "us-home-stale-ok", "ping": 60, "probe_status": "available", "probed_at": now - 3600, **home},
+            {"id": "us-home-just-failed", "probe_status": "unavailable", "probed_at": now - 30, **home},
+            {"id": "us-home-failed-long-ago", "ping": 70, "probe_status": "unavailable",
+             "probed_at": now - 7200, **home},
+            {"id": "us-home-blacklisted", "probe_status": "not_checked", **home},
+            {"id": "us-home-cooling", "probe_status": "not_checked", **home},
+            {"id": "us-dc", "country_short": "US", "ping": 1, "probe_status": "not_checked",
+             "ip_type": "hosting", "ip_type_confidence": "high"},
+            {"id": "jp", "country_short": "JP", "ping": 1, "probe_status": "not_checked"},
+        ]
+        manager.mark_blacklisted(nodes[5], "代理连通性检测失败")
+        manager.upgrade_attempt_times["us-home-cooling"] = now - 5
+        ui_cfg = {"routing_mode": "auto"}
+
+        from_non_us = manager.select_us_scout_targets(nodes, manager.NON_US_TIER, ui_cfg, now)
+        self.assertEqual(
+            ["us-home-new", "us-home-stale-ok", "us-home-failed-long-ago", "us-dc"],
+            [n["id"] for n in from_non_us],
+        )
+        # Already on a US (non-residential) node: only residential ones are an upgrade.
+        from_us_other = manager.select_us_scout_targets(nodes, manager.US_OTHER_TIER, ui_cfg, now)
+        self.assertEqual(
+            ["us-home-new", "us-home-stale-ok", "us-home-failed-long-ago"],
+            [n["id"] for n in from_us_other],
+        )
+        with mock.patch.object(manager, "US_SCOUT_PROBE_LIMIT", 2):
+            limited = manager.select_us_scout_targets(nodes, manager.NON_US_TIER, ui_cfg, now)
+        self.assertEqual(["us-home-new", "us-home-stale-ok"], [n["id"] for n in limited])
+
+    def test_scout_cannot_inject_unsafe_openvpn_config_from_pool(self) -> None:
+        manager.write_json(manager.NODES_FILE, [dict(self.JP_ACTIVE)])
+        config = base64.b64encode(b"client\nremote 203.0.113.9 1194 udp\nup /bin/evil\n").decode("ascii")
+        now = manager.time.time()
+        manager.write_json(manager.US_NODE_POOL_FILE, {
+            "203.0.113.9": {
+                "row": {"IP": "203.0.113.9", "CountryShort": "US", "CountryLong": "United States",
+                        "OpenVPN_ConfigData_Base64": config},
+                "last_seen": now, "last_ok": 0,
+            },
+        })
+
+        with mock.patch.object(manager, "log_to_json"):
+            added = manager.add_pooled_us_nodes_to_node_list()
+
+        self.assertEqual(0, added)
+        self.assertEqual(["jp"], [n["id"] for n in manager.read_nodes()])
 
 
 class ProxyServerConcurrencyTests(unittest.TestCase):

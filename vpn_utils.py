@@ -507,6 +507,21 @@ def compute_risk_control_index(info: dict[str, Any]) -> int:
     return index
 
 
+# 风控指数的理论上限：机房基准分 + 全部“不干净”信号的惩罚。
+RISK_CONTROL_INDEX_MAX = 3 * 10 + 8 + 6 + 4 + 3 + 5
+
+
+def ip_quality_score(info: dict[str, Any]) -> int:
+    """IP 质量分（0–100，越高越干净），供界面与日志展示。
+
+    它只是风控指数的另一种呈现方式（两者严格单调对应），排序仍以风控指数为准：
+    干净的移动网络 100 分、干净的住宅约 82 分，带代理 / VPN / 滥用记录依次扣分，
+    机房不超过 46 分。
+    """
+    index = compute_risk_control_index(info)
+    return max(0, min(100, int(round(100 - index * 100 / RISK_CONTROL_INDEX_MAX))))
+
+
 def extract_ipapi_is_signals(payload: dict[str, Any]) -> dict[str, Any]:
     """从 ipapi.is 响应中提取网络类型与“干净程度”信号。"""
     company = payload.get("company") if isinstance(payload.get("company"), dict) else {}

@@ -152,9 +152,28 @@ UI_PORT = env_int("UI_PORT", 8787, 1, 65535)
 # 周期刷新发现更高优先层级的可用节点（美国家宽 > 其他美国 > 其他国家）时，
 # 是否从当前节点主动切换过去（默认开启）。
 PREFER_US_AUTO_SWITCH = env_bool("PREFER_US_AUTO_SWITCH", True)
-# 两次“切换到更优美国节点”尝试之间的最短间隔，避免目标节点不稳定时来回切换。
+# 升级切换的冷却时间（秒），避免目标节点不稳定时来回切换：
+#   - 同一个目标节点在冷却期内不会被重复尝试（切换失败或切过去后又掉线都算一次）；
+#   - “同层级内仅因质量更好”的切换，两次之间至少间隔这么久。
+# 升级到更高层级（例如出现了可用的美国家宽节点）不受第二条限制，发现即切换。
 PREFER_US_SWITCH_COOLDOWN_SECONDS = env_int("PREFER_US_SWITCH_COOLDOWN_SECONDS", 1800, 0, 86400)
 last_prefer_us_switch_attempt = 0.0
+# 各目标节点最近一次被“升级切换”选中的时间（节点 ID -> 时间戳）。
+upgrade_attempt_times: dict[str, float] = {}
+# 一次升级检查里最多依次尝试多少个目标节点（仅在当前连接未被打断时才会尝试下一个）。
+UPGRADE_MAX_TARGETS_PER_RUN = 3
+# 同层级内按质量升级的门槛：可用节点的风控指数至少比当前节点低这么多才切换。
+# 默认 5，相当于“去掉了滥用记录 / 同时去掉代理与 VPN 标记 / 网络类型更好一档”；
+# 仅差一个代理或 VPN 标记不会触发。设为 0 关闭同层级质量升级。
+QUALITY_UPGRADE_MIN_GAIN = env_int("QUALITY_UPGRADE_MIN_GAIN", 5, 0, 100)
+# 美国家宽后台探测：当前不是美国家宽节点时，独立线程每隔这么多秒收集并实测美国节点，
+# 一旦探测到可用的更高层级节点（首选美国家宽）就立即切换过去。设为 0 关闭。
+US_SCOUT_INTERVAL_SECONDS = env_int("US_SCOUT_INTERVAL_SECONDS", 300, 0, 86400)
+# 每轮后台探测最多实测多少个美国节点。
+US_SCOUT_PROBE_LIMIT = env_int("US_SCOUT_PROBE_LIMIT", 8, 1, 50)
+# 探测失败的美国节点隔多久再重试（志愿者节点时开时关，值得反复尝试）。
+US_SCOUT_RETRY_UNAVAILABLE_SECONDS = env_int("US_SCOUT_RETRY_UNAVAILABLE_SECONDS", 900, 0, 86400)
+last_us_scout_heartbeat = 0.0
 # VPNGate 接口每次只返回约 100 个节点且以日韩为主，美国节点往往只是偶尔出现。
 # 出现过的美国节点会记入本地“美国节点池”并持续重试；这里是它在节点源中消失、
 # 且探测不再成功之后还保留多久（小时）。设为 0 关闭该功能。
@@ -205,6 +224,8 @@ lock = threading.RLock()
 maintenance_lock = threading.Lock()
 connection_attempt_lock = threading.Lock()
 background_refill_lock = threading.Lock()
+# 周期检测与美国家宽后台探测都会触发“升级切换”，同一时刻只允许一个在评估 / 执行。
+upgrade_switch_lock = threading.Lock()
 background_refill_cancel_event = threading.Event()
 background_refill_thread: threading.Thread | None = None
 active_sessions: dict[str, float] = {}
@@ -1946,6 +1967,18 @@ def risk_control_index(node: dict[str, Any]) -> int:
     return vpn_utils.compute_risk_control_index(node)
 
 
+def ip_quality_score(node: dict[str, Any]) -> int | None:
+    """节点的 IP 质量分（0–100，越高越干净）；IP 类型尚未识别时返回 None。"""
+    if not node.get("ip_type"):
+        return None
+    return vpn_utils.ip_quality_score(node)
+
+
+def quality_text(node: dict[str, Any]) -> str:
+    score = ip_quality_score(node)
+    return "质量未知" if score is None else f"质量{score}"
+
+
 US_RESIDENTIAL_TIER = 0
 US_OTHER_TIER = 1
 NON_US_TIER = 2
@@ -2011,6 +2044,7 @@ def describe_node_brief(node: dict[str, Any]) -> str:
         f"{node.get('id')}"
         f"[{str(node.get('country_short') or '?').upper()}"
         f"/{node.get('ip_type') or '未知类型'}"
+        f"/{quality_text(node)}"
         f"/ping={node.get('ping')}"
         f"/lat={node.get('latency_ms')}"
         f"/score={node.get('score')}"
@@ -2219,10 +2253,12 @@ def country_matches(
         return str(node_country_short or "").strip().upper() == target_upper
     return normalized_country_name(node_country).casefold() == normalized_country_name(target).casefold()
 
-def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int, int]:
+def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
     # 美国节点最先探测（已识别为家宽的排最前，已识别为机房的排在美国节点末尾），
     # 否则首轮有限的探测名额可能全被低 Ping 的其他国家占满，
     # 导致“美国家宽最高优先”规则没有机会生效。
+    # 同一档内先测风控指数低（更干净）的节点：每轮探测凑够目标数量就停，
+    # 只按 Ping 排的话，最终可选的往往只是延迟最低的几个，而不是质量最好的。
     ping = parse_int(node.get("ping")) or 999999
     tier = us_node_priority(node)
     if tier == US_OTHER_TIER:
@@ -2232,6 +2268,7 @@ def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int, int]:
         us_rank = 0 if tier == US_RESIDENTIAL_TIER else 3
     return (
         us_rank,
+        risk_control_index(node),
         ping,
         -parse_int(node.get("score")),
         -parse_int(node.get("speed")),
@@ -2651,7 +2688,7 @@ def auto_switch_node(attempt: int = 0) -> None:
     # 美国节点最高优先：可用候选里没有美国节点时，先实测尚未检测过的美国节点
     # （已识别为家宽的排最前），否则它们永远停留在“未检测”，无法被选中。
     # 候选里已有美国节点时不再额外探测，以便尽快恢复连接；更优的美国家宽节点
-    # 会在周期检测后由 maybe_switch_to_us_node 平滑升级过去。
+    # 会由美国家宽后台探测或周期检测（maybe_switch_to_better_node）平滑升级过去。
     if attempt == 0 and not any(is_us_node(n) for n in candidates):
         with lock:
             pool = read_nodes()
@@ -2707,7 +2744,7 @@ def auto_switch_node(attempt: int = 0) -> None:
                 "VPN",
                 f"排名#{rank} {describe_node_brief(n)} "
                 f"优先层级={NODE_TIER_LABELS[us_node_priority(n)]} 风控指数={risk_control_index(n)} "
-                f"延迟={n.get('latency_ms')} 评分={n.get('score')}",
+                f"{quality_text(n)} 延迟={n.get('latency_ms')} 评分={n.get('score')}",
             )
         next_node = candidates[0]
         next_tier = us_node_priority(next_node)
@@ -2722,7 +2759,7 @@ def auto_switch_node(attempt: int = 0) -> None:
             log_selection(
                 "VPN",
                 f"本次选中的 {next_node['id']} 是美国节点但不是家宽：可用候选中暂无美国家宽节点，"
-                "后续周期检测发现可用家宽节点时会自动切换",
+                "后台探测发现可用家宽节点时会自动切换",
             )
         msg = f"当前连接已失效或代理连通性检测失败，正在自动切换至最佳备用节点: {next_node['id']}"
         print(f"[自动切换] {msg}", flush=True)
@@ -3268,9 +3305,9 @@ def maintain_valid_nodes(force: bool = False) -> str:
             auto_switch_node()
 
         try:
-            maybe_switch_to_us_node()
+            maybe_switch_to_better_node("周期检测")
         except Exception as exc:
-            log_selection("VPN", f"检查是否切换到美国节点时出错: {exc}", "WARNING")
+            log_selection("VPN", f"检查是否切换到更优节点时出错: {exc}", "WARNING")
 
         valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
         total_tested = len(fast_results) + len(tested_results)
@@ -3288,74 +3325,389 @@ def maintain_valid_nodes(force: bool = False) -> str:
         maintenance_lock.release()
 
 
-def maybe_switch_to_us_node() -> None:
-    """周期刷新后：池中出现比当前节点优先层级更高的可用节点时，主动切换过去。
+def upgrade_target_cooling_down(node_id: Any, now: float | None = None) -> bool:
+    """该节点近期是否已被升级切换选中过（失败或切过去后又掉线），仍在冷却期内。"""
+    current = time.time() if now is None else now
+    return current - upgrade_attempt_times.get(str(node_id or ""), 0.0) < PREFER_US_SWITCH_COOLDOWN_SECONDS
 
-    层级为 美国家宽 > 其他美国节点 > 其他国家节点。例如当前连的是美国机房节点、
-    而池中有已探测可用的美国家宽节点，就会升级过去；当前已是美国家宽则保持不动。
+
+def select_upgrade_targets(
+    active: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    ui_cfg: dict[str, Any],
+    now: float | None = None,
+) -> tuple[list[dict[str, Any]], str, str]:
+    """挑出值得从当前节点切换过去的可用节点，返回 (候选列表, 升级类型, 说明)。
+
+    升级类型 "tier"：优先层级更高（美国家宽 > 其他美国 > 其他国家），发现即切换；
+    "quality"：同层级但明显更干净（风控指数至少低 QUALITY_UPGRADE_MIN_GAIN），
+    两次之间受冷却时间限制。候选按统一排序键从优到劣排列；没有候选时类型为空，
+    说明里给出原因。黑名单内与冷却期内的节点不会入选。
     """
-    global last_prefer_us_switch_attempt
+    current = time.time() if now is None else now
+    active_tier = us_node_priority(active)
+    blacklist = load_blacklist()
+    available = [
+        n for n in nodes
+        if n.get("probe_status") == "available"
+        and not n.get("active")
+        and n.get("id")
+        and str(n.get("id")) not in blacklist
+    ]
+    available = apply_routing_filters(available, ui_cfg)
+
+    higher = [n for n in available if us_node_priority(n) < active_tier]
+    ready = sorted(
+        (n for n in higher if not upgrade_target_cooling_down(n.get("id"), current)),
+        key=selection_rank_key,
+    )
+    if ready:
+        return ready, "tier", ""
+    note = "节点池中暂无更高优先层级的可用节点"
+    if higher:
+        note = (
+            f"{len(higher)} 个更高层级的可用节点近期已尝试过切换，"
+            f"{PREFER_US_SWITCH_COOLDOWN_SECONDS} 秒冷却期内不重复尝试"
+        )
+
+    # 同层级内按质量升级：双方的 IP 类型都已识别才比较，情报缺失时不因“未知”而切换。
+    if QUALITY_UPGRADE_MIN_GAIN > 0 and active.get("ip_type"):
+        active_risk = risk_control_index(active)
+        cleaner = sorted(
+            (
+                n for n in available
+                if us_node_priority(n) == active_tier
+                and n.get("ip_type")
+                and active_risk - risk_control_index(n) >= QUALITY_UPGRADE_MIN_GAIN
+                and not upgrade_target_cooling_down(n.get("id"), current)
+            ),
+            key=selection_rank_key,
+        )
+        if cleaner:
+            elapsed = current - last_prefer_us_switch_attempt
+            if elapsed < PREFER_US_SWITCH_COOLDOWN_SECONDS:
+                return [], "", (
+                    f"发现同层级更干净的可用节点 {describe_node_brief(cleaner[0])}，"
+                    f"但距上次升级切换仅 {int(elapsed)} 秒，"
+                    f"冷却 {PREFER_US_SWITCH_COOLDOWN_SECONDS} 秒内暂不因质量切换"
+                )
+            return cleaner, "quality", ""
+        note += f"，同层级也没有风控指数低 {QUALITY_UPGRADE_MIN_GAIN} 以上的可用节点"
+    return [], "", note
+
+
+def maybe_switch_to_better_node(trigger: str = "周期检测") -> str:
+    """有比当前节点更好的可用节点时主动切换过去，返回切换到的节点 ID（未切换为空串）。
+
+    - 优先层级更高（美国家宽 > 其他美国节点 > 其他国家节点）：发现即切换；
+    - 同层级但 IP 质量明显更好：按冷却时间限频切换。
+    切换前会保留现有连接预检目标节点；失败则恢复原节点，并在当前连接未被打断时
+    继续尝试下一个候选。由周期检测和美国家宽后台探测共同调用。
+    """
     if not PREFER_US_AUTO_SWITCH:
-        return
+        return ""
+    if not upgrade_switch_lock.acquire(blocking=False):
+        return ""
+    try:
+        return _switch_to_better_node_locked(trigger)
+    finally:
+        upgrade_switch_lock.release()
+
+
+def _switch_to_better_node_locked(trigger: str) -> str:
+    global last_prefer_us_switch_attempt
     ui_cfg = load_ui_config()
     if not ui_cfg.get("connection_enabled", True) or ui_cfg.get("routing_mode", "auto") == "fixed_ip":
-        return
+        return ""
     if not active_openvpn_running():
-        return
+        return ""
 
     with lock:
         nodes = read_nodes()
     active = next((n for n in nodes if n.get("active")), None)
     if not active:
-        return
+        return ""
     active_tier = us_node_priority(active)
-    if active_tier == US_RESIDENTIAL_TIER:
-        return
+    active_label = NODE_TIER_LABELS[active_tier]
 
-    better = [
-        n for n in nodes
-        if n.get("probe_status") == "available"
-        and not n.get("active")
-        and us_node_priority(n) < active_tier
-    ]
-    better = apply_routing_filters(better, ui_cfg)
-    if not better:
+    targets, kind, note = select_upgrade_targets(active, nodes, ui_cfg)
+    if not targets:
         log_selection(
             "VPN",
-            f"当前连接 {describe_node_brief(active)} 属于【{NODE_TIER_LABELS[active_tier]}】，"
-            "节点池中暂无更高优先层级的可用节点，保持当前连接",
+            f"[{trigger}] 当前连接 {describe_node_brief(active)} 属于【{active_label}】，{note}，保持当前连接",
         )
-        return
-    better.sort(key=selection_rank_key)
-    best = better[0]
-    best_label = NODE_TIER_LABELS[us_node_priority(best)]
-
-    elapsed = time.time() - last_prefer_us_switch_attempt
-    if elapsed < PREFER_US_SWITCH_COOLDOWN_SECONDS:
-        log_selection(
-            "VPN",
-            f"发现可用{best_label}节点 {describe_node_brief(best)}，但距上次切换尝试仅 {int(elapsed)} 秒，"
-            f"冷却 {PREFER_US_SWITCH_COOLDOWN_SECONDS} 秒内暂不切换",
-        )
-        return
-    last_prefer_us_switch_attempt = time.time()
+        return ""
 
     previous_id = str(active.get("id") or "")
-    log_selection(
-        "VPN",
-        f"发现可用{best_label}节点 {describe_node_brief(best)}(更优候选共 {len(better)} 个)，"
-        f"当前为【{NODE_TIER_LABELS[active_tier]}】节点 {describe_node_brief(active)}，按最高优先规则主动切换",
+    now = time.time()
+    for stale_id in [k for k, v in upgrade_attempt_times.items() if now - v > 2 * 86400]:
+        upgrade_attempt_times.pop(stale_id, None)
+
+    for best in targets[:UPGRADE_MAX_TARGETS_PER_RUN]:
+        best_id = str(best["id"])
+        best_label = NODE_TIER_LABELS[us_node_priority(best)]
+        if kind == "tier":
+            why = f"优先层级更高(【{active_label}】→【{best_label}】)"
+        else:
+            why = (
+                f"同属【{active_label}】但更干净"
+                f"(风控指数 {risk_control_index(active)} → {risk_control_index(best)})"
+            )
+        previous_attempt = last_prefer_us_switch_attempt
+        tunnel_before = active_openvpn_process
+        last_prefer_us_switch_attempt = time.time()
+        upgrade_attempt_times[best_id] = last_prefer_us_switch_attempt
+        log_selection(
+            "VPN",
+            f"[{trigger}] 发现更好的可用节点 {describe_node_brief(best)}(候选共 {len(targets)} 个)，{why}，"
+            f"从当前节点 {describe_node_brief(active)} 主动切换",
+        )
+        try:
+            connect_node(best_id)
+            log_selection("VPN", f"[{trigger}] 已切换到{best_label}节点 {best_id}")
+            return best_id
+        except ConnectionBusy as exc:
+            # 其他线程正在切换节点，不是目标节点的问题；不计入冷却，下次再评估。
+            upgrade_attempt_times.pop(best_id, None)
+            last_prefer_us_switch_attempt = previous_attempt
+            log_selection("VPN", f"[{trigger}] 暂不切换到{best_label}节点 {best_id}: {exc}")
+            return ""
+        except Exception as exc:
+            log_selection("VPN", f"[{trigger}] 切换到{best_label}节点 {best_id} 失败: {exc}", "WARNING")
+            recover_after_manual_connect_failure(previous_id)
+            # 只有预检失败（原隧道原封未动）才接着试下一个候选；
+            # 原连接已被打断过就到此为止，避免连续中断。
+            if active_openvpn_process is not tunnel_before or not active_openvpn_running():
+                return ""
+    return ""
+
+
+def routing_allows_us_nodes(ui_cfg: dict[str, Any]) -> bool:
+    """当前“发现国家范围 / 锁定国家”设置下，美国节点是否有可能被选用。"""
+    discovery = normalize_discovery_countries(ui_cfg.get("discovery_countries"))
+    if discovery and "US" not in discovery:
+        return False
+    target = str(ui_cfg.get("force_country") or "").strip()
+    if ui_cfg.get("routing_mode", "auto") == "fixed_region" and target:
+        return country_matches("United States", target, "US")
+    return True
+
+
+def discover_us_rows_from_sources() -> int:
+    """尽力从官方接口与 GitHub 镜像收集美国节点记入美国节点池，返回本次见到的数量。
+
+    官方接口每次返回的节点不同，多抓几次才碰得到偶尔出现的美国节点。
+    任何失败都不影响当前连接，下一轮再试。
+    """
+    if US_NODE_RETENTION_HOURS <= 0:
+        return 0
+    found = 0
+    for source_name, url in api_network_sources():
+        if not source_name.startswith("official"):
+            continue
+        try:
+            rows = parse_vpngate_rows(fetch_api_text_with_deadline(url, True))
+            found += remember_us_rows(rows, source_name)
+            break
+        except Exception as exc:
+            log_to_json("INFO", "Main", f"美国家宽后台探测: 节点源 {source_name} 暂不可用(不影响当前连接): {exc}")
+    found += harvest_us_rows_from_mirror()
+    return found
+
+
+def add_pooled_us_nodes_to_node_list() -> int:
+    """把美国节点池里尚不在节点列表中的节点补进列表（待检测状态），返回新增数量。
+
+    与周期刷新走同一套配置安全校验与黑名单过滤；只追加，不改动现有节点。
+    """
+    if US_NODE_RETENTION_HOURS <= 0:
+        return 0
+    blacklist = load_blacklist()
+    with lock:
+        known_ips = {str(n.get("ip") or "") for n in read_nodes()}
+        missing_rows = [entry["row"] for ip, entry in load_us_node_pool().items() if ip not in known_ips]
+    if not missing_rows:
+        return 0
+    new_nodes = rows_to_candidates(missing_rows, blacklist)
+    if not new_nodes:
+        return 0
+    with lock:
+        nodes = read_nodes()
+        known_ids = {str(n.get("id") or "") for n in nodes}
+        known_ips = {str(n.get("ip") or "") for n in nodes}
+        added = [n for n in new_nodes if n["id"] not in known_ids and n["ip"] not in known_ips]
+        if not added:
+            return 0
+        for node in added:
+            try:
+                config_path = Path(node["config_file"])
+                if not config_path.exists():
+                    config_path.write_text(node["config_text"], encoding="utf-8")
+            except Exception:
+                pass
+        write_json(NODES_FILE, sort_all_nodes(nodes + added))
+    ip_enrichment_wakeup.set()
+    return len(added)
+
+
+def select_us_scout_targets(
+    nodes: list[dict[str, Any]],
+    active_tier: int,
+    ui_cfg: dict[str, Any],
+    now: float | None = None,
+) -> list[dict[str, Any]]:
+    """本轮后台探测要实测的节点：层级高于当前节点、且探测结果已过期的美国节点。
+
+    刚测过可用的不重复测（可直接切换）；刚测过不可用的等
+    US_SCOUT_RETRY_UNAVAILABLE_SECONDS 再试；黑名单与升级冷却期内的跳过。
+    家宽排最前，其次按风控指数与 Ping，每轮最多 US_SCOUT_PROBE_LIMIT 个。
+    """
+    current = time.time() if now is None else now
+    blacklist = load_blacklist()
+    targets: list[dict[str, Any]] = []
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        if not node_id or node.get("active") or node_id in blacklist:
+            continue
+        if us_node_priority(node) >= active_tier:
+            continue
+        if upgrade_target_cooling_down(node_id, current):
+            continue
+        status = node.get("probe_status")
+        try:
+            age = current - float(node.get("probed_at", 0) or 0)
+        except (TypeError, ValueError):
+            age = current
+        if status == "available" and age < SWITCH_PREFLIGHT_MAX_AGE_SECONDS:
+            continue
+        if status == "unavailable" and age < US_SCOUT_RETRY_UNAVAILABLE_SECONDS:
+            continue
+        if status == "testing" and age < 60:
+            continue
+        targets.append(node)
+    targets = apply_routing_filters(targets, ui_cfg, include_unknown_ip_type=True)
+    targets.sort(key=probe_priority_key)
+    return targets[:US_SCOUT_PROBE_LIMIT]
+
+
+def run_us_scout_once() -> str:
+    """执行一轮美国家宽后台探测，返回本轮结论（同时写入状态供界面显示）。
+
+    只在“已有稳定连接、但当前节点不是美国家宽”时工作：收集美国节点 → 识别 IP 类型
+    → 用独立的测试网卡实测（不影响当前连接）→ 有更高层级的可用节点就立即切换。
+    没有隧道时由周期任务负责建立连接，这里不插手。
+    """
+    def finish(message: str, log: bool = True) -> str:
+        set_state(us_scout_last_at=time.time(), us_scout_message=message)
+        if log:
+            log_selection("VPN", f"[美国家宽后台探测] {message}")
+        return message
+
+    if not PREFER_US_AUTO_SWITCH:
+        return finish("已关闭自动升级(PREFER_US_AUTO_SWITCH=0)，不探测", log=False)
+    ui_cfg = load_ui_config()
+    if not ui_cfg.get("connection_enabled", True):
+        return finish("连接已关闭，不探测", log=False)
+    if ui_cfg.get("routing_mode", "auto") == "fixed_ip":
+        return finish("固定 IP 模式不自动切换，不探测", log=False)
+    if not routing_allows_us_nodes(ui_cfg):
+        return finish("当前的国家范围 / 锁定国家设置不包含美国，不探测", log=False)
+    if is_connecting or not active_openvpn_running():
+        return finish("当前没有稳定的活动连接，由周期任务负责建立连接", log=False)
+    if maintenance_lock.locked():
+        return finish("节点维护任务正在运行(其中已包含美国节点探测)，本轮让出", log=False)
+
+    with lock:
+        nodes = read_nodes()
+    active = next((n for n in nodes if n.get("active")), None)
+    if not active:
+        return finish("尚未确认活动节点，本轮跳过", log=False)
+    active_tier = us_node_priority(active)
+    if active_tier == US_RESIDENTIAL_TIER:
+        return finish(f"当前已连接美国家宽节点 {active.get('id')}，无需探测", log=False)
+
+    # 1. 收集：收藏模式只在收藏节点间选择，新节点无意义，跳过收集。
+    seen = added = 0
+    if ui_cfg.get("routing_mode", "auto") != "favorites":
+        seen = discover_us_rows_from_sources()
+        added = add_pooled_us_nodes_to_node_list()
+
+    # 2. 识别美国节点的 IP 类型，才能判断是否家宽。
+    with lock:
+        nodes = read_nodes()
+    untyped_ids = {
+        str(n.get("id"))
+        for n in nodes
+        if n.get("id")
+        and str(n.get("country_short") or "").strip().upper() == "US"
+        and not n.get("ip_type")
+    }
+    if untyped_ids:
+        try:
+            enrich_stored_nodes(only_ids=untyped_ids)
+        except Exception as exc:
+            log_to_json("WARNING", "Main", f"美国家宽后台探测: 识别 IP 类型失败: {exc}")
+        with lock:
+            nodes = read_nodes()
+
+    # 3. 实测。
+    us_nodes = [n for n in nodes if is_us_node(n) and not n.get("active")]
+    targets = select_us_scout_targets(nodes, active_tier, ui_cfg)
+    available_count = 0
+    if targets:
+        log_selection(
+            "VPN",
+            f"[美国家宽后台探测] 当前为【{NODE_TIER_LABELS[active_tier]}】节点 {active.get('id')}；"
+            f"节点源本次见到美国节点 {seen} 个，新加入列表 {added} 个，列表中{us_counts_text(us_nodes)}；"
+            f"本轮实测 {len(targets)} 个: {describe_nodes(targets, US_SCOUT_PROBE_LIMIT)}",
+        )
+        results = test_multiple_nodes([n["id"] for n in targets], target_available=TARGET_VALID_NODES)
+        available_count = sum(1 for r in results if r.get("probe_status") == "available")
+
+    # 4. 有更高层级的可用节点就立即切换（也会用上此前已测可用、尚未切换的节点）。
+    if is_connecting or not active_openvpn_running():
+        return finish("探测期间连接发生变化，本轮不切换")
+    switched_id = maybe_switch_to_better_node("美国家宽后台探测")
+    if switched_id:
+        with lock:
+            switched = next((n for n in read_nodes() if n.get("id") == switched_id), {})
+        return finish(
+            f"已切换到{NODE_TIER_LABELS[us_node_priority(switched)]}节点 {switched_id}({quality_text(switched)})"
+        )
+    summary = (
+        f"当前为【{NODE_TIER_LABELS[active_tier]}】节点；列表中{us_counts_text(us_nodes)}，"
+        f"本轮实测 {len(targets)} 个、可用 {available_count} 个，暂无可切换的更优美国节点，"
+        f"{US_SCOUT_INTERVAL_SECONDS} 秒后继续"
     )
-    try:
-        connect_node(best["id"])
-        log_selection("VPN", f"已切换到{best_label}节点 {best['id']}")
-    except ConnectionBusy as exc:
-        # 其他线程正在切换节点，不是目标节点的问题；下个周期再评估。
-        last_prefer_us_switch_attempt = 0.0
-        log_selection("VPN", f"暂不切换到{best_label}节点 {best['id']}: {exc}")
-    except Exception as exc:
-        log_selection("VPN", f"切换到{best_label}节点 {best['id']} 失败: {exc}", "WARNING")
-        recover_after_manual_connect_failure(previous_id)
+    return finish(summary, log=bool(targets))
+
+
+def us_residential_scout_loop() -> None:
+    """后台线程：持续寻找可用的美国家宽节点，探测到就切换过去。"""
+    global last_us_scout_heartbeat
+    if US_SCOUT_INTERVAL_SECONDS <= 0:
+        return
+
+    def wait(seconds: float) -> None:
+        global last_us_scout_heartbeat
+        wake_at = time.time() + seconds
+        while True:
+            last_us_scout_heartbeat = time.time()
+            remaining = wake_at - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 15))
+
+    # 启动后先让周期任务完成首次连接。
+    wait(min(60, US_SCOUT_INTERVAL_SECONDS))
+    while True:
+        try:
+            run_us_scout_once()
+        except Exception as exc:
+            message = f"美国家宽后台探测出错: {exc}"
+            print(f"[错误] {message}", flush=True)
+            log_to_json("ERROR", "Main", message)
+        wait(US_SCOUT_INTERVAL_SECONDS)
 
 
 def no_tunnel_retry_delay(idle_rounds: int) -> int:
@@ -5476,6 +5828,16 @@ const translateIpType = t => {
 };
 
 const translateConfidence = value => ({high: "高", medium: "中", low: "低"}[value] || "未知");
+const ipQualityText = n => (n && n.ip_quality_score !== null && n.ip_quality_score !== undefined) ? `${n.ip_quality_score}/100` : "待识别";
+const ipQualityFlags = n => {
+  if (!n || !n.ip_type) return "尚未识别";
+  const flags = [];
+  if (n.is_tor) flags.push("Tor 出口");
+  if (n.is_abuser) flags.push("有滥用记录");
+  if (n.is_vpn) flags.push("公开 VPN");
+  if (n.is_proxy) flags.push("代理");
+  return flags.length ? flags.join("、") : "未见不良记录";
+};
 
 const translateCountry = c => {
   const dict = {
@@ -5770,6 +6132,7 @@ function render(){
     const declaredFlag = countryFlag(activeNode.country_short);
     const locationFlag = countryFlag(activeNode.geo_country_short || activeNode.country_short);
     const ipTypeTitle = `${translateIpType(activeNode.ip_type)} · 置信度：${translateConfidence(activeNode.ip_type_confidence)} · 来源：${(activeNode.ip_type_sources || []).join(" + ") || "未知"}`;
+    const qualityTitle = `${ipQualityFlags(activeNode)} · 0–100，越高越干净，自动选择时优先`;
     activeCardHtml = `
       <div class="active-card">
         <div class="active-card-info">
@@ -5789,6 +6152,7 @@ function render(){
               <span style="margin-left: 12px;">延时: <strong>${latencyText}</strong></span>
               <span style="margin-left: 12px;">运营主体: <strong>${esc(activeNode.owner || activeNode.as_name || "-")}</strong></span>
               <span style="margin-left: 12px;" title="${esc(ipTypeTitle)}">IP 类型: <strong>${esc(translateIpType(activeNode.ip_type))}</strong></span>
+              <span style="margin-left: 12px;" title="${esc(qualityTitle)}">IP 质量: <strong>${esc(ipQualityText(activeNode))}</strong></span>
             </div>
           </div>
         </div>
@@ -5828,7 +6192,8 @@ function render(){
   const statusMessage = state.last_check_message || "";
   const activeNodeInfo = activeNode ? `<span class="badge available" style="margin-left:8px; padding:2px 8px;">${esc(translateCountry(activeNode.country))} (${esc(activeNode.id)})</span>` : `<span class="badge unavailable" style="margin-left:8px; padding:2px 8px;">无</span>`;
   const localProxy = state.local_proxy || `http://127.0.0.1:${state.proxy_port || 7928}`;
-  if ($("status")) { $("status").innerHTML=`<span class="status-dot"></span>HTTP 代理本地接口：${esc(localProxy)} | 活动节点：${activeNodeInfo} | 状态：${esc(statusMessage)}`; }
+  const scoutInfo = state.us_scout_message ? ` | 美国家宽后台探测：${esc(state.us_scout_message)}` : "";
+  if ($("status")) { $("status").innerHTML=`<span class="status-dot"></span>HTTP 代理本地接口：${esc(localProxy)} | 活动节点：${activeNodeInfo} | 状态：${esc(statusMessage)}${scoutInfo}`; }
   
   // Update proxy test status card based on background checks
   const pBadge = $("proxy_status_badge");
@@ -5911,7 +6276,7 @@ function render(){
       const locationTitle = n.location
         ? `IP 推测位置：${displayLocation}；节点申报国家：${translateCountry(n.country)}`
         : `节点申报国家：${translateCountry(n.country)}`;
-      const ipTypeTitle = `${translateIpType(n.ip_type)} · 置信度：${translateConfidence(n.ip_type_confidence)} · 来源：${(n.ip_type_sources || []).join(" + ") || "未知"}`;
+      const ipTypeTitle = `${translateIpType(n.ip_type)} · 置信度：${translateConfidence(n.ip_type_confidence)} · 来源：${(n.ip_type_sources || []).join(" + ") || "未知"} · IP 质量：${ipQualityText(n)}（${ipQualityFlags(n)}）`;
       
       const isTesting = testingNodeIds.has(n.id) || n.probe_status === "testing";
       const testSpinner = `<svg style="animation: spin 1s linear infinite; width: 12px; height: 12px; display: inline-block; margin-right: 4px; vertical-align: middle;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.2" fill="none"></circle><path d="M4 12a8 8 0 018-8" stroke="currentColor" fill="none"></path></svg>`;
@@ -7455,6 +7820,7 @@ class Handler(BaseHTTPRequestHandler):
                 stripped = n.copy()
                 if "config_text" in stripped:
                     del stripped["config_text"]
+                stripped["ip_quality_score"] = ip_quality_score(n)
                 stripped_nodes.append(stripped)
             self.send_json({"nodes": stripped_nodes, "state": get_state()})
         elif effective_path == "/api/check_update":
@@ -7560,17 +7926,28 @@ class Handler(BaseHTTPRequestHandler):
                 "details": f"上次心跳: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_pinger_heartbeat)) if last_pinger_heartbeat > 0 else '等待启动'}",
                 "error": "" if pinger_ok else "线程可能已中止，无法实时刷新活动节点的 Ping 延迟。"
             }
-            self.send_json({
-                "ok": True,
-                "services": [
-                    web_ui_status,
-                    proxy_gateway_status,
-                    openvpn_status,
-                    collector_status,
-                    checker_status,
-                    pinger_status
-                ]
-            })
+            services = [
+                web_ui_status,
+                proxy_gateway_status,
+                openvpn_status,
+                collector_status,
+                checker_status,
+                pinger_status,
+            ]
+            if US_SCOUT_INTERVAL_SECONDS > 0:
+                # 一轮探测（抓取 + 实测 + 可能的切换）期间不更新心跳，阈值留足余量。
+                scout_ok = (
+                    last_us_scout_heartbeat > 0.0
+                    and now - last_us_scout_heartbeat < US_SCOUT_INTERVAL_SECONDS + 600.0
+                ) or (server_uptime < 15.0)
+                scout_message = str(get_state().get("us_scout_message") or "等待首轮探测")
+                services.append({
+                    "name": "美国家宽后台探测线程",
+                    "status": "running" if scout_ok else "stopped",
+                    "details": f"每 {US_SCOUT_INTERVAL_SECONDS} 秒一轮；最近结论: {scout_message}",
+                    "error": "" if scout_ok else "线程可能已中止，无法在后台寻找并切换到美国家宽节点。",
+                })
+            self.send_json({"ok": True, "services": services})
         elif effective_path == "/api/logs":
             logs_dir = DATA_DIR / "logs"
             date_str = time.strftime("%Y-%m-%d", time.localtime())
@@ -8135,6 +8512,7 @@ def main() -> None:
     threading.Thread(target=ip_enrichment_loop, daemon=True).start()
     threading.Thread(target=background_proxy_checker, daemon=True).start()
     threading.Thread(target=active_node_pinger, daemon=True).start()
+    threading.Thread(target=us_residential_scout_loop, name="vpngate-us-scout", daemon=True).start()
     
     ui_cfg = load_ui_config()
     ui_host = ui_cfg.get("host", UI_HOST)
