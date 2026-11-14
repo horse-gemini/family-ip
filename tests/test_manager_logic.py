@@ -100,6 +100,8 @@ class ManagerLogicTests(unittest.TestCase):
         manager.active_openvpn_node_id = ""
         manager.active_connection_cancel_event = None
         manager.is_connecting = False
+        manager.maintenance_busy = False
+        manager.pending_connection_node_id = ""
         manager.consecutive_proxy_failures = 0
         manager.last_proxy_failure_node_id = ""
         manager.background_refill_thread = None
@@ -499,10 +501,74 @@ class ManagerLogicTests(unittest.TestCase):
             [node["id"] for node in ordered],
         )
 
-    def test_us_node_priority_flags_only_us_nodes(self) -> None:
-        self.assertEqual(manager.us_node_priority({"country_short": "us", "ip_type": "hosting"}), 0)
-        self.assertEqual(manager.us_node_priority({"country_short": "US", "ip_type": "residential"}), 0)
-        self.assertEqual(manager.us_node_priority({"country_short": "JP", "ip_type": "residential"}), 1)
+    def test_us_node_priority_ranks_us_residential_then_other_us_then_rest(self) -> None:
+        us_home = {"country_short": "US", "ip_type": "residential", "ip_type_confidence": "medium"}
+        self.assertEqual(manager.US_RESIDENTIAL_TIER, manager.us_node_priority(us_home))
+        self.assertTrue(manager.is_us_residential_node(us_home))
+
+        # Other US nodes stay ahead of every non-US node, but behind US residential.
+        for other_us in (
+            {"country_short": "us", "ip_type": "hosting", "ip_type_confidence": "high"},
+            {"country_short": "US", "ip_type": "mobile", "ip_type_confidence": "high"},
+            {"country_short": "US"},
+            # An unverified "residential" guess is not trusted as home broadband.
+            {"country_short": "US", "ip_type": "residential", "ip_type_confidence": "low"},
+            {"country_short": "US", "ip_type": "residential"},
+        ):
+            self.assertEqual(manager.US_OTHER_TIER, manager.us_node_priority(other_us), other_us)
+            self.assertTrue(manager.is_us_node(other_us))
+
+        self.assertEqual(
+            manager.NON_US_TIER,
+            manager.us_node_priority(
+                {"country_short": "JP", "ip_type": "residential", "ip_type_confidence": "high"}
+            ),
+        )
+
+    def test_us_node_requires_ip_intel_not_to_contradict_declared_country(self) -> None:
+        declared_us_located_elsewhere = {
+            "country_short": "US", "geo_country_short": "CA",
+            "ip_type": "residential", "ip_type_confidence": "medium",
+        }
+        self.assertFalse(manager.is_us_node(declared_us_located_elsewhere))
+        self.assertEqual(manager.NON_US_TIER, manager.us_node_priority(declared_us_located_elsewhere))
+        self.assertTrue(manager.is_us_node({"country_short": "US", "geo_country_short": "us"}))
+
+    def test_us_residential_wins_over_faster_us_hosting_and_cleaner_non_us(self) -> None:
+        nodes = [
+            {"id": "jp-mobile", "probe_status": "available", "country_short": "JP",
+             "ip_type": "mobile", "ip_type_confidence": "high", "latency_ms": 5, "score": 900},
+            {"id": "us-hosting-fast", "probe_status": "available", "country_short": "US",
+             "ip_type": "hosting", "ip_type_confidence": "high", "latency_ms": 10, "score": 900},
+            {"id": "us-mobile", "probe_status": "available", "country_short": "US",
+             "ip_type": "mobile", "ip_type_confidence": "high", "latency_ms": 20, "score": 900},
+            {"id": "us-home-slow", "probe_status": "available", "country_short": "US",
+             "ip_type": "residential", "ip_type_confidence": "medium", "latency_ms": 400, "score": 1},
+        ]
+
+        ordered = manager.sort_all_nodes(nodes)
+
+        self.assertEqual(
+            ["us-home-slow", "us-mobile", "us-hosting-fast", "jp-mobile"],
+            [node["id"] for node in ordered],
+        )
+
+    def test_probe_priority_tests_us_residential_before_other_us_nodes(self) -> None:
+        nodes = [
+            {"id": "jp-fast", "country_short": "JP", "ping": 1},
+            {"id": "us-hosting", "country_short": "US", "ping": 2,
+             "ip_type": "hosting", "ip_type_confidence": "high"},
+            {"id": "us-unknown", "country_short": "US", "ping": 3},
+            {"id": "us-home", "country_short": "US", "ping": 90,
+             "ip_type": "residential", "ip_type_confidence": "medium"},
+        ]
+
+        ordered = sorted(nodes, key=manager.probe_priority_key)
+
+        self.assertEqual(
+            ["us-home", "us-unknown", "us-hosting", "jp-fast"],
+            [n["id"] for n in ordered],
+        )
 
     def test_us_node_wins_over_lower_risk_but_non_us_node(self) -> None:
         nodes = [
@@ -600,6 +666,38 @@ class ManagerLogicTests(unittest.TestCase):
             {"id": "us", "country_short": "US", "probe_status": "available"},
         ]
         self.assertEqual([], self._run_prefer_us(jp_active, cooldown_elapsed=5)[0])
+
+    def test_prefer_us_upgrades_from_us_hosting_to_us_residential(self) -> None:
+        pool = [
+            {"id": "us-dc", "country_short": "US", "active": True, "probe_status": "available",
+             "ip_type": "hosting", "ip_type_confidence": "high"},
+            {"id": "us-dc-2", "country_short": "US", "probe_status": "available", "latency_ms": 5,
+             "ip_type": "hosting", "ip_type_confidence": "high"},
+            {"id": "us-home", "country_short": "US", "probe_status": "available", "latency_ms": 200,
+             "ip_type": "residential", "ip_type_confidence": "medium"},
+        ]
+        connected, _ = self._run_prefer_us(pool)
+        self.assertEqual(["us-home"], connected)
+
+    def test_prefer_us_keeps_active_us_residential_node(self) -> None:
+        pool = [
+            {"id": "us-home", "country_short": "US", "active": True, "probe_status": "available",
+             "ip_type": "residential", "ip_type_confidence": "medium"},
+            {"id": "us-home-2", "country_short": "US", "probe_status": "available", "latency_ms": 1,
+             "ip_type": "residential", "ip_type_confidence": "high"},
+        ]
+        self.assertEqual([], self._run_prefer_us(pool)[0])
+
+    def test_prefer_us_does_not_treat_busy_switch_as_node_failure(self) -> None:
+        pool = [
+            {"id": "jp", "country_short": "JP", "active": True, "probe_status": "available"},
+            {"id": "us", "country_short": "US", "probe_status": "available"},
+        ]
+        connected, recovered = self._run_prefer_us(
+            pool, connect_error=manager.ConnectionBusy("busy")
+        )
+        self.assertEqual([], connected)
+        self.assertEqual([], recovered)
 
     def test_prefer_us_recovers_previous_node_when_switch_fails(self) -> None:
         pool = [
@@ -916,7 +1014,7 @@ class ManagerLogicTests(unittest.TestCase):
             mock.patch.object(manager, "schedule_background_refill", return_value=True) as schedule_mock,
             mock.patch.object(manager, "log_to_json") as log_mock,
         ):
-            manager.auto_switch_node(attempt=3)
+            manager.auto_switch_node(attempt=manager.AUTO_SWITCH_MAX_ATTEMPTS)
 
         schedule_mock.assert_called_once_with()
         log_mock.assert_called_once_with("INFO", "Main", "连续自动切换失败，已启动唯一后台节点补齐任务")
@@ -1322,6 +1420,466 @@ class ManagerLogicTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "no valid nodes"):
             snapshot_utils.parse_and_validate_snapshot(csv_text)
+
+
+    # ---- stability: failover, health monitoring and self-healing ----
+
+    def _available_pool(self) -> list[dict]:
+        nodes = self.write_nodes(3)
+        for node in nodes:
+            node["probe_status"] = "available"
+            node["latency_ms"] = 10
+        manager.write_json(manager.NODES_FILE, nodes)
+        return nodes
+
+    def test_auto_switch_tries_next_candidate_after_a_failed_node(self) -> None:
+        nodes = self._available_pool()
+        attempts: list[str] = []
+
+        def fake_connect(node_id: str) -> str:
+            attempts.append(node_id)
+            if len(attempts) == 1:
+                stored = manager.read_nodes()
+                for item in stored:
+                    if item["id"] == node_id:
+                        item["probe_status"] = "unavailable"
+                manager.write_json(manager.NODES_FILE, stored)
+                raise RuntimeError("handshake failed")
+            return "connected"
+
+        with (
+            mock.patch.object(manager, "connect_node", fake_connect),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.auto_switch_node()
+
+        self.assertEqual([nodes[0]["id"], nodes[1]["id"]], attempts)
+
+    def test_auto_switch_yields_when_another_switch_is_running(self) -> None:
+        self._available_pool()
+        attempts: list[str] = []
+
+        def busy_connect(node_id: str) -> str:
+            attempts.append(node_id)
+            raise manager.ConnectionBusy("当前已有连接切换任务正在运行，请稍后再试")
+
+        with (
+            mock.patch.object(manager, "connect_node", busy_connect),
+            mock.patch.object(manager, "schedule_background_refill") as schedule_mock,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.auto_switch_node()
+
+        # A busy switch is not a node failure: no retries, no refill, nodes stay available.
+        self.assertEqual(1, len(attempts))
+        schedule_mock.assert_not_called()
+        self.assertTrue(all(n["probe_status"] == "available" for n in manager.read_nodes()))
+
+    def test_auto_switch_without_candidates_does_not_tear_down_inflight_connection(self) -> None:
+        self.write_nodes(1)
+        self.assertTrue(manager.connection_attempt_lock.acquire(blocking=False))
+        with (
+            mock.patch.object(manager, "clear_active_connection_state") as clear_mock,
+            mock.patch.object(manager, "test_multiple_nodes", return_value=[]),
+            mock.patch.object(manager, "schedule_background_refill") as schedule_mock,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.auto_switch_node()
+
+        clear_mock.assert_not_called()
+        schedule_mock.assert_not_called()
+
+    def test_connection_attempt_is_allowed_while_maintenance_is_probing(self) -> None:
+        manager.maintenance_busy = True
+
+        token, cancel_event = manager.begin_connection_attempt()
+        try:
+            self.assertTrue(manager.is_connecting)
+            with self.assertRaises(manager.ConnectionBusy):
+                manager.begin_connection_attempt()
+        finally:
+            manager.finish_connection_attempt(token, cancel_event)
+
+        self.assertFalse(manager.is_connecting)
+        # The UI still reports a busy state for the whole maintenance run.
+        self.assertTrue(manager.get_state()["is_connecting"])
+
+    def test_health_check_recovers_dead_tunnel_during_maintenance(self) -> None:
+        nodes = self._available_pool()
+        nodes[0]["active"] = True
+        manager.write_json(manager.NODES_FILE, nodes)
+        dead = FakeProcess()
+        dead.running = False
+        manager.active_openvpn_process = dead
+        manager.active_openvpn_node_id = nodes[0]["id"]
+        manager.maintenance_busy = True
+
+        with (
+            mock.patch.object(manager, "check_proxy_health") as health_mock,
+            mock.patch.object(manager, "auto_switch_node") as switch_mock,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.run_proxy_health_check_once()
+
+        # No slow exit probe for a process that is already gone, and recovery is immediate.
+        health_mock.assert_not_called()
+        switch_mock.assert_called_once_with()
+        stored = {n["id"]: n for n in manager.read_nodes()}
+        self.assertEqual("unavailable", stored[nodes[0]["id"]]["probe_status"])
+        self.assertIn(nodes[0]["id"], manager.load_blacklist())
+
+    def test_health_check_is_skipped_while_a_switch_is_in_progress(self) -> None:
+        manager.is_connecting = True
+        with mock.patch.object(manager, "check_proxy_health") as health_mock:
+            manager.run_proxy_health_check_once()
+        health_mock.assert_not_called()
+
+    def test_health_check_does_not_report_failure_before_first_connection(self) -> None:
+        manager.maintenance_busy = True
+        with mock.patch.object(manager, "check_proxy_health") as health_mock:
+            manager.run_proxy_health_check_once()
+        health_mock.assert_not_called()
+
+    def test_health_check_waits_for_failure_threshold_before_switching(self) -> None:
+        nodes = self._available_pool()
+        manager.active_openvpn_process = FakeProcess()
+        manager.active_openvpn_node_id = nodes[0]["id"]
+
+        with (
+            mock.patch.object(manager, "check_proxy_health", return_value={"ok": False, "error": "timeout"}),
+            mock.patch.object(manager, "repair_policy_routing_if_needed", return_value=False),
+            mock.patch.object(manager, "PROXY_FAILURE_THRESHOLD", 3),
+            mock.patch.object(manager, "auto_switch_node") as switch_mock,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.run_proxy_health_check_once()
+            manager.run_proxy_health_check_once()
+            switch_mock.assert_not_called()
+            manager.run_proxy_health_check_once()
+
+        switch_mock.assert_called_once_with()
+
+    def test_health_check_repairs_lost_policy_route_instead_of_switching(self) -> None:
+        nodes = self._available_pool()
+        manager.active_openvpn_process = FakeProcess()
+        manager.active_openvpn_node_id = nodes[0]["id"]
+        results = [
+            {"ok": False, "error": "no route"},
+            {"ok": True, "ip": "203.0.113.7", "latency_ms": 120},
+        ]
+
+        with (
+            mock.patch.object(manager, "check_proxy_health", side_effect=results) as health_mock,
+            mock.patch.object(manager, "repair_policy_routing_if_needed", return_value=True) as repair_mock,
+            mock.patch.object(manager, "auto_switch_node") as switch_mock,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.run_proxy_health_check_once()
+
+        repair_mock.assert_called_once_with("tun0")
+        self.assertEqual(2, health_mock.call_count)
+        switch_mock.assert_not_called()
+        self.assertEqual(0, manager.consecutive_proxy_failures)
+        state = manager.get_state()
+        self.assertTrue(state["proxy_ok"])
+        self.assertEqual("203.0.113.7", state["proxy_ip"])
+
+    def test_policy_routing_intact_detects_missing_route_or_rule(self) -> None:
+        def fake_ip(route_out: str, rule_out: str, route_rc: int = 0):
+            def run(cmd, **kwargs):
+                if cmd[:3] == ["ip", "route", "show"]:
+                    return subprocess.CompletedProcess(cmd, route_rc, route_out, "")
+                return subprocess.CompletedProcess(cmd, 0, rule_out, "")
+            return run
+
+        rules = "0:\tfrom all lookup local\n32765:\tfrom all oif tun0 lookup 100\n32766:\tfrom all lookup main\n"
+        with mock.patch.object(manager.sys, "platform", "linux"):
+            with mock.patch.object(manager.subprocess, "run", fake_ip("default dev tun0 scope link\n", rules)):
+                self.assertTrue(manager.policy_routing_intact("tun0"))
+            with mock.patch.object(manager.subprocess, "run", fake_ip("", rules)):
+                self.assertFalse(manager.policy_routing_intact("tun0"))
+            with mock.patch.object(manager.subprocess, "run", fake_ip("", rules, route_rc=2)):
+                self.assertFalse(manager.policy_routing_intact("tun0"))
+            with mock.patch.object(
+                manager.subprocess, "run",
+                fake_ip("default dev tun0 scope link\n", "0:\tfrom all lookup local\n"),
+            ):
+                self.assertFalse(manager.policy_routing_intact("tun0"))
+            with mock.patch.object(manager.subprocess, "run", side_effect=FileNotFoundError("ip")):
+                self.assertIsNone(manager.policy_routing_intact("tun0"))
+
+    def test_repair_policy_routing_only_when_tunnel_is_up_and_route_is_missing(self) -> None:
+        with mock.patch.object(manager, "setup_policy_routing", return_value=True) as setup_mock:
+            # No running tunnel: nothing to repair.
+            self.assertFalse(manager.repair_policy_routing_if_needed("tun0"))
+            manager.active_openvpn_process = FakeProcess()
+            manager.active_openvpn_node_id = "node-0"
+            with (
+                mock.patch.object(manager.Path, "exists", return_value=True),
+                mock.patch.object(manager, "log_to_json"),
+            ):
+                with mock.patch.object(manager, "policy_routing_intact", return_value=True):
+                    self.assertFalse(manager.repair_policy_routing_if_needed("tun0"))
+                with mock.patch.object(manager, "policy_routing_intact", return_value=None):
+                    self.assertFalse(manager.repair_policy_routing_if_needed("tun0"))
+                setup_mock.assert_not_called()
+                with mock.patch.object(manager, "policy_routing_intact", return_value=False):
+                    self.assertTrue(manager.repair_policy_routing_if_needed("tun0"))
+        setup_mock.assert_called_once_with("tun0")
+
+    def test_setup_policy_routing_is_idempotent_and_clears_duplicate_rules(self) -> None:
+        commands: list[list[str]] = []
+        remaining_rules = [3]
+
+        def fake_run(cmd, **kwargs):
+            commands.append(list(cmd))
+            if cmd[:3] == ["ip", "rule", "del"]:
+                if remaining_rules[0] > 0:
+                    remaining_rules[0] -= 1
+                    return subprocess.CompletedProcess(cmd, 0, b"", b"")
+                return subprocess.CompletedProcess(cmd, 2, b"", b"no such rule")
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        with mock.patch.object(manager.subprocess, "run", fake_run):
+            self.assertTrue(manager.setup_policy_routing("tun0"))
+
+        self.assertEqual(4, sum(cmd[:3] == ["ip", "rule", "del"] for cmd in commands))
+        self.assertIn(["ip", "route", "replace", "default", "dev", "tun0", "table", "100"], commands)
+        self.assertNotIn(["ip", "route", "add", "default", "dev", "tun0", "table", "100"], commands)
+        self.assertEqual(1, sum(cmd[:3] == ["ip", "rule", "add"] for cmd in commands))
+
+    def test_proxy_check_wakes_early_once_when_tunnel_process_exits(self) -> None:
+        dead = FakeProcess()
+        dead.running = False
+        manager.active_openvpn_process = dead
+        manager.active_openvpn_node_id = "node-0"
+        manager._exit_wake_process = None
+
+        started = manager.time.time()
+        manager.wait_for_next_proxy_check(30)
+        self.assertLess(manager.time.time() - started, 5)
+
+        # The same dead process must not cause a busy loop of early wake-ups.
+        started = manager.time.time()
+        manager.wait_for_next_proxy_check(0.3)
+        self.assertGreaterEqual(manager.time.time() - started, 0.25)
+
+    def test_no_tunnel_retry_backs_off_instead_of_waiting_a_full_cycle(self) -> None:
+        with (
+            mock.patch.object(manager, "CHECK_INTERVAL_SECONDS", 1260),
+            mock.patch.object(manager, "NO_TUNNEL_RETRY_MAX_SECONDS", 300),
+        ):
+            delays = [manager.no_tunnel_retry_delay(n) for n in (1, 2, 3, 4, 5, 50)]
+        self.assertEqual([30, 60, 120, 240, 300, 300], delays)
+        with (
+            mock.patch.object(manager, "CHECK_INTERVAL_SECONDS", 45),
+            mock.patch.object(manager, "NO_TUNNEL_RETRY_MAX_SECONDS", 300),
+        ):
+            self.assertEqual(45, manager.no_tunnel_retry_delay(9))
+
+    def test_exit_ip_check_requires_a_real_ip_address(self) -> None:
+        self.assertTrue(manager.looks_like_ip_address("203.0.113.9"))
+        self.assertTrue(manager.looks_like_ip_address(" 2001:db8::1 "))
+        self.assertFalse(manager.looks_like_ip_address("<html>blocked</html>"))
+        self.assertFalse(manager.looks_like_ip_address(""))
+
+    def _run_health_check_with_curl_outputs(self, outputs: list[str]) -> tuple[dict, int]:
+        calls = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            index = min(calls["n"], len(outputs) - 1)
+            calls["n"] += 1
+            return subprocess.CompletedProcess(cmd, 0, outputs[index], "")
+
+        listener = mock.MagicMock()
+        with (
+            mock.patch.object(manager.socket, "socket", return_value=listener),
+            mock.patch.object(manager.Path, "exists", return_value=True),
+            mock.patch.object(manager.subprocess, "run", fake_run),
+            mock.patch.object(manager.proxy_server, "get_proxy_credentials", return_value=(None, None)),
+            mock.patch.object(manager.vpn_utils, "diagnose_local_obstructions", return_value=None),
+        ):
+            return manager.check_proxy_health(), calls["n"]
+
+    def test_exit_ip_check_accepts_trailing_newline_from_ip_service(self) -> None:
+        result, calls = self._run_health_check_with_curl_outputs(["203.0.113.9\n\n0.412 200"])
+        self.assertEqual({"ok": True, "ip": "203.0.113.9", "latency_ms": 412}, result)
+        self.assertEqual(1, calls)
+
+    def test_exit_ip_check_falls_through_hijacked_page_to_next_service(self) -> None:
+        result, calls = self._run_health_check_with_curl_outputs(
+            ["<html>captive portal</html>\n0.050 200", "198.51.100.4\n0.300 200"]
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("198.51.100.4", result["ip"])
+        self.assertEqual(2, calls)
+
+    def test_exit_ip_check_fails_when_no_service_returns_an_ip(self) -> None:
+        result, calls = self._run_health_check_with_curl_outputs(["<html>blocked</html>\n0.050 200"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(manager.PROXY_HEALTH_CHECK_URLS), calls)
+
+    def test_node_refresh_keeps_ip_intel_and_pending_connection_target(self) -> None:
+        existing = self.write_nodes(3)
+        existing[0].update(
+            country_short="US", ip_type="residential", ip_type_confidence="medium",
+            geo_country_short="US", is_vpn=False, abuser_score=0.01, risk_control_index=10,
+            probe_status="available", latency_ms=77,
+        )
+        manager.write_json(manager.NODES_FILE, existing)
+        # node-2 is being connected right now but has dropped out of the fresh list.
+        manager.pending_connection_node_id = existing[2]["id"]
+        fresh = [
+            {**node, "probe_status": "not_checked", "latency_ms": 0}
+            for node in self.write_nodes(2)
+        ]
+        fresh[0]["country_short"] = "US"
+        manager.write_json(manager.NODES_FILE, existing)
+        manager.active_openvpn_process = FakeProcess()
+        manager.active_openvpn_node_id = "missing-from-list"
+
+        with (
+            mock.patch.object(manager, "fetch_candidates", return_value=fresh),
+            mock.patch.object(manager, "test_multiple_nodes", return_value=[]),
+            mock.patch.object(manager, "maybe_switch_to_us_node"),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.maintain_valid_nodes()
+
+        stored = {node["id"]: node for node in manager.read_nodes()}
+        self.assertIn(existing[2]["id"], stored)
+        refreshed = stored[existing[0]["id"]]
+        self.assertEqual("medium", refreshed["ip_type_confidence"])
+        self.assertEqual("US", refreshed["geo_country_short"])
+        self.assertEqual("available", refreshed["probe_status"])
+        self.assertTrue(manager.is_us_residential_node(refreshed))
+        self.assertFalse(manager.maintenance_busy)
+
+    def test_source_outage_reconnects_from_existing_available_pool(self) -> None:
+        self._available_pool()
+
+        with (
+            mock.patch.object(manager, "fetch_candidates", side_effect=RuntimeError("[ERR_API] all sources down")),
+            mock.patch.object(manager.vpn_utils, "check_and_fix_dns"),
+            mock.patch.object(manager, "auto_switch_node") as switch_mock,
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            result = manager.maintain_valid_nodes()
+
+        self.assertEqual("没有拉取到新节点", result)
+        switch_mock.assert_called_once_with()
+
+    def test_failed_connect_does_not_overwrite_concurrent_node_updates(self) -> None:
+        nodes = self.write_nodes(2)
+
+        def fake_openvpn(*args, **kwargs):
+            # A probe / enrichment thread updates the list while the handshake is running.
+            stored = manager.read_nodes()
+            stored[1]["probe_status"] = "available"
+            stored[1]["ip_type"] = "residential"
+            manager.write_json(manager.NODES_FILE, stored)
+            return False, "handshake failed", None
+
+        with (
+            mock.patch.object(manager, "run_openvpn_until_ready", side_effect=fake_openvpn),
+            mock.patch.object(manager, "cleanup_policy_routing"),
+            mock.patch.object(manager, "delete_tun_device"),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "handshake failed"):
+                manager.connect_node(nodes[0]["id"])
+
+        stored = {node["id"]: node for node in manager.read_nodes()}
+        self.assertEqual("unavailable", stored[nodes[0]["id"]]["probe_status"])
+        self.assertEqual("available", stored[nodes[1]["id"]]["probe_status"])
+        self.assertEqual("residential", stored[nodes[1]["id"]]["ip_type"])
+        self.assertEqual("", manager.pending_connection_node_id)
+
+    def test_us_enrichment_before_selection_only_targets_untyped_us_nodes(self) -> None:
+        nodes = self.write_nodes(4)
+        nodes[0].update(country_short="US")
+        nodes[1].update(country_short="US", ip_type="hosting", ip_type_confidence="high")
+        nodes[2].update(country_short="JP")
+        nodes[3].update(country_short="US")
+        manager.write_json(manager.NODES_FILE, nodes)
+        seen: list[list[str]] = []
+
+        def fake_enrich(batch: list[dict]) -> None:
+            seen.append(sorted(node["id"] for node in batch))
+            for node in batch:
+                node.update(ip_type="residential", ip_type_confidence="medium", geo_country_short="US")
+
+        with (
+            mock.patch.object(manager.vpn_utils, "enrich_ip_info", fake_enrich),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            manager.enrich_us_nodes_before_selection()
+
+        self.assertEqual([[nodes[0]["id"], nodes[3]["id"]]], seen)
+        stored = {node["id"]: node for node in manager.read_nodes()}
+        self.assertTrue(manager.is_us_residential_node(stored[nodes[0]["id"]]))
+        self.assertEqual("hosting", stored[nodes[1]["id"]]["ip_type"])
+        self.assertFalse(stored[nodes[2]["id"]].get("ip_type"))
+
+    def test_us_enrichment_before_selection_does_not_block_past_deadline(self) -> None:
+        nodes = self.write_nodes(1)
+        nodes[0].update(country_short="US")
+        manager.write_json(manager.NODES_FILE, nodes)
+        release = threading.Event()
+
+        def slow_enrich(batch: list[dict]) -> None:
+            release.wait(5)
+
+        try:
+            with (
+                mock.patch.object(manager.vpn_utils, "enrich_ip_info", slow_enrich),
+                mock.patch.object(manager, "US_ENRICH_DEADLINE_SECONDS", 0.2),
+                mock.patch.object(manager, "log_to_json"),
+            ):
+                started = manager.time.time()
+                manager.enrich_us_nodes_before_selection()
+                elapsed = manager.time.time() - started
+        finally:
+            release.set()
+
+        self.assertLess(elapsed, 2)
+
+    def test_ip_cache_save_is_atomic_and_drops_expired_entries(self) -> None:
+        now = manager.time.time()
+        manager.vpn_utils.save_ip_cache({
+            "198.51.100.1": {"ip_type": "residential", "cached_at": now},
+            "198.51.100.2": {"ip_type": "hosting", "cached_at": now - manager.vpn_utils.IP_CACHE_TTL_SECONDS - 10},
+            "198.51.100.3": "corrupted",
+        })
+
+        cache = manager.vpn_utils.load_ip_cache()
+        self.assertEqual(["198.51.100.1"], list(cache))
+        self.assertFalse(manager.vpn_utils.IP_CACHE_FILE.with_suffix(".json.tmp").exists())
+        manager.vpn_utils.IP_CACHE_FILE.write_text("[1, 2, 3]", encoding="utf-8")
+        self.assertEqual({}, manager.vpn_utils.load_ip_cache())
+
+    def test_stop_process_reaps_a_process_that_ignores_sigterm(self) -> None:
+        events: list[str] = []
+
+        class StubbornProcess:
+            def poll(self):
+                return None
+
+            def terminate(self) -> None:
+                events.append("terminate")
+
+            def wait(self, timeout=None):
+                events.append(f"wait:{timeout}")
+                if "kill" not in events:
+                    raise subprocess.TimeoutExpired("openvpn", timeout)
+                return -9
+
+            def kill(self) -> None:
+                events.append("kill")
+
+        manager.stop_process(StubbornProcess())
+
+        self.assertEqual(["terminate", "wait:8", "kill", "wait:3"], events)
 
 
 class ProxyServerConcurrencyTests(unittest.TestCase):

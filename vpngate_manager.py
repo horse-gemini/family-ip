@@ -128,6 +128,15 @@ MANUAL_TEST_NODE_LIMIT = env_int("MANUAL_TEST_NODE_LIMIT", 5, 1, 20)
 INITIAL_CONNECT_TEST_LIMIT = env_int("INITIAL_CONNECT_TEST_LIMIT", 10, 1, 50)
 NODE_PROBE_WORKERS = env_int("NODE_PROBE_WORKERS", 5, 1, 20)
 PROXY_FAILURE_THRESHOLD = env_int("PROXY_FAILURE_THRESHOLD", 3, 1, 10)
+# 代理出口健康检测的间隔；OpenVPN 进程意外退出时会立即唤醒检测，不必等满间隔。
+PROXY_CHECK_INTERVAL_SECONDS = env_int("PROXY_CHECK_INTERVAL_SECONDS", 30, 5, 600)
+# 一次自动切换最多连续尝试多少个备用节点，全部失败后转入后台补齐。
+AUTO_SWITCH_MAX_ATTEMPTS = env_int("AUTO_SWITCH_MAX_ATTEMPTS", 5, 1, 20)
+# 已开启连接但没有可用隧道时，维护线程的重试间隔从 30 秒起指数退避到该上限，
+# 而不是等满一个完整的周期检测间隔。
+NO_TUNNEL_RETRY_MAX_SECONDS = env_int("NO_TUNNEL_RETRY_MAX_SECONDS", 300, 30, 3600)
+# 选节点前同步识别美国节点 IP 类型（家宽 / 机房）的最长等待时间，超时则先按已知信息选择。
+US_ENRICH_DEADLINE_SECONDS = env_int("US_ENRICH_DEADLINE_SECONDS", 12, 0, 60)
 SWITCH_PREFLIGHT_MAX_AGE_SECONDS = env_int("SWITCH_PREFLIGHT_MAX_AGE_SECONDS", 180, 0, 3600)
 OPENVPN_CMD = os.environ.get("OPENVPN_CMD", "openvpn")
 OPENVPN_AUTH_USER = os.environ.get("OPENVPN_AUTH_USER", "vpn")
@@ -140,9 +149,10 @@ UI_HOST = os.environ.get("UI_HOST", "127.0.0.1")
 # 通配 / 全网监听地址：出现在历史配置中时会被安全收敛为回环地址。
 EXPOSED_UI_HOSTS = {"", "*", "0.0.0.0", "::", "::0", "0.0.0.0.0.0.0.0"}
 UI_PORT = env_int("UI_PORT", 8787, 1, 65535)
-# 周期刷新发现可用的美国节点时，是否从非美国节点主动切换过去（默认开启）。
+# 周期刷新发现更高优先层级的可用节点（美国家宽 > 其他美国 > 其他国家）时，
+# 是否从当前节点主动切换过去（默认开启）。
 PREFER_US_AUTO_SWITCH = env_bool("PREFER_US_AUTO_SWITCH", True)
-# 两次“切换到美国节点”尝试之间的最短间隔，避免美国节点不稳定时来回切换。
+# 两次“切换到更优美国节点”尝试之间的最短间隔，避免目标节点不稳定时来回切换。
 PREFER_US_SWITCH_COOLDOWN_SECONDS = env_int("PREFER_US_SWITCH_COOLDOWN_SECONDS", 1800, 0, 86400)
 last_prefer_us_switch_attempt = 0.0
 INVALID_BACKOFF_SECONDS = env_int("INVALID_BACKOFF_SECONDS", 30 * 60, 1)
@@ -192,7 +202,13 @@ pending_openvpn_process: subprocess.Popen[str] | None = None
 active_connection_cancel_event: threading.Event | None = None
 connection_epoch = 0
 active_openvpn_node_id = ""
+# 正在建立连接的目标节点；刷新节点列表时必须保留它，否则连上后列表里找不到活动节点。
+pending_connection_node_id = ""
+# is_connecting 只表示“有一次连接 / 切换正在进行”。节点维护与手动测速使用
+# maintenance_busy：它只用于界面忙碌状态，不会阻止健康检测与故障切换，
+# 因此周期检测耗时再长，断线也能被及时发现并恢复。
 is_connecting = False
+maintenance_busy = False
 last_active_ping_time = 0.0
 last_active_latency = 0
 consecutive_proxy_failures = 0
@@ -227,6 +243,9 @@ IP_ENRICHMENT_FIELDS = (
 
 class ConnectionCancelled(RuntimeError):
     pass
+
+class ConnectionBusy(RuntimeError):
+    """已有连接 / 切换任务在进行；不代表目标节点不可用。"""
 
 class SourceDeadlineExceeded(TimeoutError):
     pass
@@ -292,6 +311,7 @@ def read_json(path: Path, default: Any) -> Any:
             return default
 
 import hashlib
+import ipaddress
 
 def generate_random_password() -> str:
     import string
@@ -533,7 +553,7 @@ def get_state() -> dict[str, Any]:
     state = read_json(STATE_FILE, {})
     state.pop("password", None)
     state["active_openvpn_node_id"] = active_openvpn_node_id
-    state["is_connecting"] = is_connecting
+    state["is_connecting"] = is_connecting or maintenance_busy
     state["maintenance_running"] = maintenance_lock.locked()
     state.setdefault("api_url", API_URL)
     state.setdefault("mirror_url", MIRROR_HTTPS_URL)
@@ -1102,7 +1122,7 @@ def rows_to_candidates(
         candidates.append(node)
         seen_ips.add(ip)
     if skipped_blacklisted:
-        us_skipped = [(n, e) for n, e in skipped_blacklisted if us_node_priority(n) == 0]
+        us_skipped = [(n, e) for n, e in skipped_blacklisted if is_us_node(n)]
         detail = "; ".join(
             f"{n.get('id')} 原因={str(e.get('reason') or '')[:60]} "
             f"剩余{max(0, int(float(e.get('until', 0) or 0) - time.time()))}秒"
@@ -1172,7 +1192,7 @@ def fetch_candidates() -> list[dict[str, Any]]:
                 f"节点源 {source_name}: 原始候选 {len(candidates)} 个(其中美国 {count_us_nodes(candidates)} 个)，"
                 f"国家范围筛选后 {len(filtered_candidates)} 个(其中美国 {count_us_nodes(filtered_candidates)} 个)，"
                 f"发现国家范围={discovery_countries or '全部'}；"
-                f"美国节点: {describe_nodes([n for n in candidates if us_node_priority(n) == 0], 8)}",
+                f"美国节点: {describe_nodes([n for n in candidates if is_us_node(n)], 8)}",
             )
             set_state(
                 last_fetch_at=time.time(),
@@ -1356,17 +1376,22 @@ def stop_process(process: subprocess.Popen[str] | None) -> None:
             process.kill()
         except OSError:
             pass
+        # 回收被强杀的进程，避免留下僵尸进程并确保 TUN 网卡已被内核释放。
+        try:
+            process.wait(timeout=3)
+        except Exception:
+            pass
 
 def begin_connection_attempt() -> tuple[int, threading.Event]:
     global connection_epoch, active_connection_cancel_event, is_connecting
     if not connection_attempt_lock.acquire(blocking=False):
-        raise RuntimeError("当前已有连接切换任务正在运行，请稍后再试")
+        raise ConnectionBusy("当前已有连接切换任务正在运行，请稍后再试")
 
     cancel_event = threading.Event()
     with lock:
         if is_connecting:
             connection_attempt_lock.release()
-            raise RuntimeError("当前已有连接或节点检测任务正在运行，请稍后再试")
+            raise ConnectionBusy("当前已有连接任务正在运行，请稍后再试")
         connection_epoch += 1
         token = connection_epoch
         active_connection_cancel_event = cancel_event
@@ -1601,20 +1626,32 @@ def run_openvpn_until_ready(
     return ok, message, process
 
 
+def delete_policy_rules() -> None:
+    """删除全部指向 table 100 的策略规则。
+
+    `ip rule del` 每次只删一条；重复添加或上次清理不完整时会残留多条，
+    因此循环删除直到没有剩余。
+    """
+    for _ in range(32):
+        try:
+            result = subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+        except Exception:
+            return
+        if result.returncode != 0:
+            return
+
 def setup_policy_routing(interface: str = "tun0") -> bool:
-    try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
-    except Exception:
-        pass
-    try:
-        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
-    except Exception:
-        pass
-    
     success = False
     for attempt in range(1, 4):
+        # 每次尝试都从干净状态开始：上一次尝试可能只完成了一半（路由已加、规则未加），
+        # 不清理就重试会因 “File exists” 永远失败。
+        delete_policy_rules()
         try:
-            subprocess.run(["ip", "route", "add", "default", "dev", interface, "table", "100"], check=True, timeout=2)
+            subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
+        except Exception:
+            pass
+        try:
+            subprocess.run(["ip", "route", "replace", "default", "dev", interface, "table", "100"], check=True, timeout=2)
             subprocess.run(["ip", "rule", "add", "oif", interface, "table", "100"], check=True, timeout=2)
             # 配置反向路径过滤 rp_filter 为 loose 模式 (2)，防止回包被内核静默丢弃
             for proc_path in ["all", "default", interface]:
@@ -1636,11 +1673,52 @@ def setup_policy_routing(interface: str = "tun0") -> bool:
 
 def cleanup_policy_routing() -> None:
     try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+        delete_policy_rules()
         subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
         print("[policy_routing] Cleared policy routing table 100", flush=True)
     except Exception:
         pass
+
+def policy_routing_intact(interface: str = "tun0") -> bool | None:
+    """检查 table 100 的默认路由与 oif 规则是否仍然存在。
+
+    返回 True / False；无法判断（非 Linux、缺少 ip 命令等）时返回 None。
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        route = subprocess.run(["ip", "route", "show", "table", "100"], capture_output=True, text=True, timeout=2)
+        rule = subprocess.run(["ip", "rule", "show"], capture_output=True, text=True, timeout=2)
+    except Exception:
+        return None
+    if rule.returncode != 0:
+        return None
+    # 表不存在时 `ip route show table 100` 会返回非 0，等同于路由缺失。
+    route_ok = route.returncode == 0 and any(
+        line.split()[:1] == ["default"] and f"dev {interface}" in line
+        for line in (route.stdout or "").splitlines()
+    )
+    rule_ok = any(
+        f"oif {interface}" in line and re.search(r"lookup\s+100\b", line)
+        for line in (rule.stdout or "").splitlines()
+    )
+    return route_ok and rule_ok
+
+def repair_policy_routing_if_needed(interface: str = "tun0") -> bool:
+    """隧道仍在但策略路由丢失时就地修复，返回是否执行了修复。
+
+    OpenVPN 软重启（ping-restart）重建 tun0 后，内核会清掉 table 100 里的路由，
+    此时节点本身是好的，只需重新下发路由，不应当作节点失效去切换。
+    """
+    if not active_openvpn_running():
+        return False
+    if not Path(f"/sys/class/net/{interface}").exists():
+        return False
+    if policy_routing_intact(interface) is not False:
+        return False
+    log_to_json("WARNING", "Routing", f"检测到 {interface} 的策略路由丢失，正在自动修复...")
+    print(f"[policy_routing] {interface} 的策略路由丢失，正在自动修复...", flush=True)
+    return setup_policy_routing(interface)
 
 def delete_tun_device(dev: str = "tun0") -> None:
     """删除残留的 TUN 虚拟网卡。
@@ -1718,15 +1796,63 @@ def risk_control_index(node: dict[str, Any]) -> int:
     return vpn_utils.compute_risk_control_index(node)
 
 
-def us_node_priority(node: dict[str, Any]) -> int:
-    """最高优先级规则：优先选择可用的美国（US）IP 节点。
+US_RESIDENTIAL_TIER = 0
+US_OTHER_TIER = 1
+NON_US_TIER = 2
+NODE_TIER_LABELS = {
+    US_RESIDENTIAL_TIER: "美国家宽",
+    US_OTHER_TIER: "美国非家宽",
+    NON_US_TIER: "非美国",
+}
 
-    返回 0 表示该节点为美国节点，应最优先选择；返回 1 表示其他节点。
-    调用方只在“可用”节点中排序，且该规则优先级高于风控指数、实测延迟与评分，
-    因此作为排序主键使用。
+
+def is_us_node(node: dict[str, Any]) -> bool:
+    """节点是否为美国（US）节点。
+
+    以 VPNGate 申报的国家为准；但 IP 情报源已明确把该 IP 定位到其他国家时，
+    出口并不在美国，不再视为美国节点。
     """
-    country_short = str(node.get("country_short") or "").strip().upper()
-    return 0 if country_short == "US" else 1
+    if str(node.get("country_short") or "").strip().upper() != "US":
+        return False
+    geo_country = str(node.get("geo_country_short") or "").strip().upper()
+    return geo_country in ("", "US")
+
+
+def is_us_residential_node(node: dict[str, Any]) -> bool:
+    """节点是否为美国家宽（住宅宽带）节点。
+
+    与“严格住宅出站”同一口径：IP 类型为住宅且分类置信度为中或高；
+    尚未识别或低置信度的节点不算家宽。
+    """
+    return (
+        is_us_node(node)
+        and str(node.get("ip_type") or "").strip().lower() == "residential"
+        and node.get("ip_type_confidence") in ("medium", "high")
+    )
+
+
+def us_node_priority(node: dict[str, Any]) -> int:
+    """最高优先级规则：美国家宽 > 其他美国节点 > 其他国家节点。
+
+    返回 0 表示美国家宽节点，1 表示其他美国节点（移动 / 未识别 / 机房，
+    组内再按风控指数排序），2 表示非美国节点。调用方只在“可用”节点中排序，
+    且该规则优先级高于风控指数、实测延迟与评分，因此作为排序主键使用。
+    """
+    if is_us_residential_node(node):
+        return US_RESIDENTIAL_TIER
+    if is_us_node(node):
+        return US_OTHER_TIER
+    return NON_US_TIER
+
+
+def selection_rank_key(node: dict[str, Any]) -> tuple[int, int, int, int]:
+    """可用节点的统一排序键：优先层级 → 风控指数 → 实测延迟 → 评分。"""
+    return (
+        us_node_priority(node),
+        risk_control_index(node),
+        parse_int(node.get("latency_ms")) or 999999,
+        -parse_int(node.get("score")),
+    )
 
 
 def describe_node_brief(node: dict[str, Any]) -> str:
@@ -1749,7 +1875,16 @@ def describe_nodes(nodes: list[dict[str, Any]], limit: int = 12) -> str:
 
 
 def count_us_nodes(nodes: list[dict[str, Any]]) -> int:
-    return sum(1 for n in nodes if us_node_priority(n) == 0)
+    return sum(1 for n in nodes if is_us_node(n))
+
+
+def count_us_residential_nodes(nodes: list[dict[str, Any]]) -> int:
+    return sum(1 for n in nodes if is_us_residential_node(n))
+
+
+def us_counts_text(nodes: list[dict[str, Any]]) -> str:
+    """日志用：“美国 N 个/家宽 M 个”。"""
+    return f"美国 {count_us_nodes(nodes)} 个/家宽 {count_us_residential_nodes(nodes)} 个"
 
 
 def log_selection(module: str, message: str, level: str = "INFO") -> None:
@@ -1761,12 +1896,7 @@ def log_selection(module: str, message: str, level: str = "INFO") -> None:
 def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     available_nodes = sorted(
         [n for n in nodes if n.get("probe_status") == "available" or n.get("active")],
-        key=lambda n: (
-            us_node_priority(n),
-            risk_control_index(n),
-            parse_int(n.get("latency_ms")) or 999999,
-            -parse_int(n.get("score"))
-        )
+        key=selection_rank_key,
     )
     untested_nodes = sorted(
         [n for n in nodes if n.get("probe_status") in ("not_checked", "testing") and not n.get("active")],
@@ -1778,10 +1908,12 @@ def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
     return available_nodes + untested_nodes + unavailable_nodes
 
-def enrich_stored_nodes() -> int:
+def enrich_stored_nodes(only_ids: set[str] | None = None) -> int:
     """Enrich every listed IP, then merge only metadata into the latest state."""
     with lock:
         snapshot = read_nodes()
+    if only_ids is not None:
+        snapshot = [node for node in snapshot if str(node.get("id") or "") in only_ids]
     if not snapshot:
         return 0
 
@@ -1809,6 +1941,51 @@ def enrich_stored_nodes() -> int:
         if changed:
             write_json(NODES_FILE, sort_all_nodes(current_nodes))
     return changed
+
+def enrich_us_nodes_before_selection() -> None:
+    """选节点前先识别美国节点的 IP 类型，让“美国家宽优先”在首连时就能生效。
+
+    只处理申报为美国且尚未识别类型的节点，并设有总时限：情报源慢或不可用时
+    不阻塞连接，超时后先按已知信息选择，识别结果稍后由后台线程补齐。
+    """
+    if US_ENRICH_DEADLINE_SECONDS <= 0:
+        return
+    with lock:
+        nodes = read_nodes()
+    pending_ids = {
+        str(n.get("id"))
+        for n in nodes
+        if n.get("id")
+        and str(n.get("country_short") or "").strip().upper() == "US"
+        and not n.get("ip_type")
+    }
+    if not pending_ids:
+        return
+
+    done = threading.Event()
+
+    def worker() -> None:
+        try:
+            enrich_stored_nodes(only_ids=pending_ids)
+        except Exception as exc:
+            log_to_json("WARNING", "Main", f"识别美国节点 IP 类型失败: {exc}")
+        finally:
+            done.set()
+
+    threading.Thread(target=worker, name="vpngate-us-enrich", daemon=True).start()
+    if done.wait(US_ENRICH_DEADLINE_SECONDS):
+        with lock:
+            refreshed = [n for n in read_nodes() if str(n.get("id") or "") in pending_ids]
+        log_selection(
+            "Main",
+            f"已识别 {len(pending_ids)} 个美国节点的 IP 类型，其中家宽 {count_us_residential_nodes(refreshed)} 个",
+        )
+    else:
+        log_selection(
+            "Main",
+            f"识别美国节点 IP 类型超过 {US_ENRICH_DEADLINE_SECONDS} 秒，先按已知信息选择节点",
+            "WARNING",
+        )
 
 def ip_enrichment_loop() -> None:
     while True:
@@ -1893,11 +2070,18 @@ def country_matches(
     return normalized_country_name(node_country).casefold() == normalized_country_name(target).casefold()
 
 def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int, int]:
-    # 美国节点最先探测，否则首轮有限的探测名额可能全被低 Ping 的其他国家占满，
-    # 导致“美国节点最高优先”规则没有机会生效。
+    # 美国节点最先探测（已识别为家宽的排最前，已识别为机房的排在美国节点末尾），
+    # 否则首轮有限的探测名额可能全被低 Ping 的其他国家占满，
+    # 导致“美国家宽最高优先”规则没有机会生效。
     ping = parse_int(node.get("ping")) or 999999
+    tier = us_node_priority(node)
+    if tier == US_OTHER_TIER:
+        # 细分为：未识别类型 / 移动（仍可能是家宽或同样干净）先于已确认的机房。
+        us_rank = 2 if str(node.get("ip_type") or "").strip().lower() == "hosting" else 1
+    else:
+        us_rank = 0 if tier == US_RESIDENTIAL_TIER else 3
     return (
-        us_node_priority(node),
+        us_rank,
         ping,
         -parse_int(node.get("score")),
         -parse_int(node.get("speed")),
@@ -1972,7 +2156,6 @@ def enforce_active_node_allowed_by_routing(ui_cfg: dict[str, Any], reason: str =
         return msg
 
 def reconnect_fixed_node_if_needed(ui_cfg: dict[str, Any]) -> bool:
-    global is_connecting
     if ui_cfg.get("routing_mode") != "fixed_ip" or active_openvpn_running():
         return False
     target_id = current_fixed_node_id(ui_cfg)
@@ -1983,16 +2166,12 @@ def reconnect_fixed_node_if_needed(ui_cfg: dict[str, Any]) -> bool:
         return False
 
     print(f"[维护线程] 固定 IP 模式下 OpenVPN 未运行，正在重新拉起同一节点: {target_id}", flush=True)
-    previous_connecting = is_connecting
-    is_connecting = False
     try:
         connect_node(target_id)
         return active_openvpn_running()
     except Exception as e:
         print(f"[维护线程] 重新拉起固定节点 {target_id} 失败: {e}", flush=True)
         return False
-    finally:
-        is_connecting = previous_connecting
 
 active_test_indexes = set()
 test_indexes_lock = threading.Lock()
@@ -2213,7 +2392,7 @@ def test_multiple_nodes(node_ids: list[str], target_available: int | None = None
         f"{n.get('id')}={updated_nodes_map[str(n.get('id'))].get('probe_status')}"
         f"({str(updated_nodes_map[str(n.get('id'))].get('probe_message') or '')[:80]})"
         for n in to_test
-        if us_node_priority(n) == 0 and str(n.get("id")) in updated_nodes_map
+        if is_us_node(n) and str(n.get("id")) in updated_nodes_map
     ]
     if us_probe_lines:
         log_selection("VPN", "本轮探测的美国节点结果: " + "; ".join(us_probe_lines))
@@ -2282,8 +2461,11 @@ def schedule_background_refill() -> bool:
         return True
 
 def auto_switch_node(attempt: int = 0) -> None:
-    if attempt >= 3:
-        print("[自动切换] 连续切换失败已达 3 次，停止切换以防止主线程死锁，将在后台重新加载节点...", flush=True)
+    if attempt >= AUTO_SWITCH_MAX_ATTEMPTS:
+        print(
+            f"[自动切换] 连续切换失败已达 {AUTO_SWITCH_MAX_ATTEMPTS} 次，停止本轮切换，将在后台重新加载节点...",
+            flush=True,
+        )
         if schedule_background_refill():
             log_to_json("INFO", "Main", "连续自动切换失败，已启动唯一后台节点补齐任务")
         return
@@ -2310,25 +2492,22 @@ def auto_switch_node(attempt: int = 0) -> None:
             and not n.get("active")
         ]
         available = apply_routing_filters(available, ui_cfg)
-        available.sort(key=lambda n: (
-            us_node_priority(n),
-            risk_control_index(n),
-            parse_int(n.get("latency_ms")) or 999999,
-            -parse_int(n.get("score")),
-        ))
+        available.sort(key=selection_rank_key)
         return available
 
     # Find the next best available node
     candidates = collect_ranked_candidates()
 
-    # 美国节点最高优先：可用候选里没有美国节点时，先实测尚未检测过的美国节点，
-    # 否则它们永远停留在“未检测”，无法被选中。
-    if attempt == 0 and not any(us_node_priority(n) == 0 for n in candidates):
+    # 美国节点最高优先：可用候选里没有美国节点时，先实测尚未检测过的美国节点
+    # （已识别为家宽的排最前），否则它们永远停留在“未检测”，无法被选中。
+    # 候选里已有美国节点时不再额外探测，以便尽快恢复连接；更优的美国家宽节点
+    # 会在周期检测后由 maybe_switch_to_us_node 平滑升级过去。
+    if attempt == 0 and not any(is_us_node(n) for n in candidates):
         with lock:
             pool = read_nodes()
         untested_us = [
             n for n in pool
-            if us_node_priority(n) == 0
+            if is_us_node(n)
             and not n.get("active")
             and n.get("probe_status") in ("not_checked", "testing", None, "")
         ]
@@ -2359,7 +2538,7 @@ def auto_switch_node(attempt: int = 0) -> None:
 
     with lock:
         all_nodes_snapshot = read_nodes()
-    us_all = [n for n in all_nodes_snapshot if us_node_priority(n) == 0]
+    us_all = [n for n in all_nodes_snapshot if is_us_node(n)]
     us_status: dict[str, int] = {}
     for n in us_all:
         key = str(n.get("probe_status") or "unknown") + ("(当前活动)" if n.get("active") else "")
@@ -2368,48 +2547,59 @@ def auto_switch_node(attempt: int = 0) -> None:
         "VPN",
         f"自动选择(第 {attempt + 1} 次尝试): 路由模式={routing_mode}, 强制国家={target_country or '无'}, "
         f"出口IP类型={ui_cfg.get('routing_ip_type', 'all')}；"
-        f"可用候选 {len(candidates)} 个(其中美国 {count_us_nodes(candidates)} 个)；"
-        f"节点池美国节点共 {len(us_all)} 个，状态分布={us_status or '无'}",
+        f"可用候选 {len(candidates)} 个(其中{us_counts_text(candidates)})；"
+        f"节点池美国节点共 {len(us_all)} 个(家宽 {count_us_residential_nodes(us_all)} 个)，"
+        f"状态分布={us_status or '无'}",
     )
     if candidates:
         for rank, n in enumerate(candidates[:10], 1):
             log_selection(
                 "VPN",
                 f"排名#{rank} {describe_node_brief(n)} "
-                f"美国优先键={us_node_priority(n)} 风控指数={risk_control_index(n)} "
+                f"优先层级={NODE_TIER_LABELS[us_node_priority(n)]} 风控指数={risk_control_index(n)} "
                 f"延迟={n.get('latency_ms')} 评分={n.get('score')}",
             )
         next_node = candidates[0]
-        if us_node_priority(next_node) != 0:
+        next_tier = us_node_priority(next_node)
+        if next_tier == NON_US_TIER:
             log_selection(
                 "VPN",
                 f"本次选中的 {next_node['id']} 不是美国节点：可用候选中没有美国节点"
                 f"(美国节点状态={us_status or '节点池中没有美国节点'})",
                 "WARNING",
             )
+        elif next_tier == US_OTHER_TIER:
+            log_selection(
+                "VPN",
+                f"本次选中的 {next_node['id']} 是美国节点但不是家宽：可用候选中暂无美国家宽节点，"
+                "后续周期检测发现可用家宽节点时会自动切换",
+            )
         msg = f"当前连接已失效或代理连通性检测失败，正在自动切换至最佳备用节点: {next_node['id']}"
         print(f"[自动切换] {msg}", flush=True)
         log_to_json("INFO", "VPN", msg)
         try:
             connect_node(next_node["id"])
+        except ConnectionBusy as e:
+            # 另一个线程正在连接 / 切换：这不是节点故障，让出即可，不消耗重试次数。
+            busy_msg = f"已有其他连接或切换任务在进行，本次自动切换让出: {e}"
+            print(f"[自动切换] {busy_msg}", flush=True)
+            log_to_json("INFO", "VPN", busy_msg)
         except Exception as e:
             err_msg = f"切换到备用节点 {next_node['id']} 失败: {e}，将尝试下一个..."
             print(f"[自动切换] {err_msg}", flush=True)
             log_to_json("WARNING", "VPN", err_msg)
             auto_switch_node(attempt + 1)
     else:
+        if connection_attempt_lock.locked():
+            # 其他线程正在建立连接，此时清理 tun0 会破坏它刚建好的隧道。
+            log_to_json("INFO", "VPN", "没有可用的备选节点，但已有其他连接任务在进行，暂不清理当前连接")
+            return
         msg = "没有可用的备选节点，将自动断开并清理当前连接状态，同时在后台异步获取新节点..."
         if routing_mode == "fixed_region" and target_country:
             msg = f"没有可用的【{target_country}】备选节点，已断开连接，将在后台持续尝试获取新节点..."
         print(f"[自动切换] {msg}", flush=True)
         log_to_json("WARNING", "VPN", msg)
-        stop_active_openvpn()
-        with lock:
-            nodes = read_nodes()
-            for item in nodes:
-                item["active"] = False
-            write_json(NODES_FILE, nodes)
-        set_state(active_openvpn_node_id="", last_check_message=msg)
+        clear_active_connection_state(msg)
         if schedule_background_refill():
             log_to_json("INFO", "Main", "已启动唯一后台节点补齐任务")
 
@@ -2433,6 +2623,7 @@ def connect_node(node_id: str) -> str:
     global active_openvpn_process, active_openvpn_node_id
     global last_active_ping_time, last_active_latency
     global consecutive_proxy_failures, last_proxy_failure_node_id
+    global pending_connection_node_id
     node_id = str(node_id or "").strip()
     if not node_id:
         raise ValueError("Node id is required")
@@ -2441,6 +2632,8 @@ def connect_node(node_id: str) -> str:
     stopped_existing = False
     previous_node_id = ""
     try:
+        with lock:
+            pending_connection_node_id = node_id
         set_state(
             is_connecting=True,
             pending_node_id=node_id,
@@ -2536,11 +2729,17 @@ def connect_node(node_id: str) -> str:
                     config_path.unlink()
             except Exception:
                 pass
-            node["probe_status"] = "unavailable"
-            node["probe_message"] = message
-            for item in nodes:
-                item["active"] = False
-            write_json(NODES_FILE, sort_all_nodes(nodes))
+            # 重新读取最新列表再落盘：开头读到的快照可能已被探测 / 富化线程更新过，
+            # 直接写回会覆盖它们的结果。
+            with lock:
+                latest_nodes = read_nodes()
+                for item in latest_nodes:
+                    item["active"] = False
+                    if item.get("id") == node_id:
+                        item["probe_status"] = "unavailable"
+                        item["probe_message"] = message
+                        item["probed_at"] = time.time()
+                write_json(NODES_FILE, sort_all_nodes(latest_nodes))
             log_to_json("ERROR", "VPN", f"连接节点 {node_id} 失败: {message}")
             print(f"[连接核心失败] 无法与 VPN 节点 {node_id} 建立隧道连接！详情: {message}", flush=True)
             raise RuntimeError(message)
@@ -2637,11 +2836,14 @@ def connect_node(node_id: str) -> str:
             set_state(is_connecting=False, pending_node_id="", last_check_message=f"连接失败: {exc}")
         raise
     finally:
+        with lock:
+            if pending_connection_node_id == node_id:
+                pending_connection_node_id = ""
         finish_connection_attempt(token, cancel_event)
         set_state(pending_node_id="")
 
 def maintain_valid_nodes(force: bool = False) -> str:
-    global active_openvpn_process, active_openvpn_node_id, is_connecting
+    global active_openvpn_process, active_openvpn_node_id, maintenance_busy
     ensure_dirs()
     if not maintenance_lock.acquire(blocking=False):
         msg = "节点维护任务正在运行，请稍后再试"
@@ -2653,7 +2855,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
             msg = "当前已有连接或节点测试任务正在运行，请稍后再试"
             set_state(last_check_message=msg)
             return msg
-        is_connecting = True
+        maintenance_busy = True
     try:
         # A forced refresh must not tear down a healthy tunnel. It only forces
         # the node-pool maintenance path below.
@@ -2675,17 +2877,16 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 else:
                     has_active_id = False
                     with lock:
-                        if active_openvpn_node_id:
+                        # 其他线程正在建立连接时不要清理，避免误删它刚创建的 tun0。
+                        if active_openvpn_node_id and not connection_attempt_lock.locked():
                             has_active_id = True
                             stop_active_openvpn()
                     if has_active_id:
                         print("[维护线程] 检测到当前 OpenVPN 进程已意外退出，准备自动切换节点", flush=True)
-                        is_connecting = False
                         auto_switch_node()
-                        is_connecting = True
 
         try:
-            set_state(is_connecting=True, last_check_message="正在拉取最新的免费 VPN 节点列表...")
+            set_state(last_check_message="正在拉取最新的免费 VPN 节点列表...")
             candidates = fetch_candidates()
         except Exception as exc:
             vpn_utils.check_and_fix_dns()
@@ -2697,6 +2898,19 @@ def maintain_valid_nodes(force: bool = False) -> str:
             candidates = []
 
         if not candidates:
+            # 节点源全部不可用时，仍用现有节点池里已探测可用的节点尝试恢复连接，
+            # 而不是一直断线等到节点源恢复。
+            if not active_openvpn_running():
+                ui_cfg = load_ui_config()
+                if ui_cfg.get("connection_enabled", True) and ui_cfg.get("routing_mode", "auto") != "fixed_ip":
+                    with lock:
+                        pool_available = [
+                            n for n in read_nodes()
+                            if n.get("probe_status") == "available" and not n.get("active")
+                        ]
+                    if apply_routing_filters(pool_available, ui_cfg):
+                        log_to_json("WARNING", "Main", "节点源不可用，尝试使用现有节点池中的可用节点恢复连接")
+                        auto_switch_node()
             return "没有拉取到新节点"
 
         with lock:
@@ -2706,37 +2920,28 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 for n in current_nodes
                 if n.get("id")
             }
-            active_node = None
-            if active_openvpn_node_id:
-                active_node = next((n for n in current_nodes if n.get("id") == active_openvpn_node_id), None)
-                
             merged: list[dict[str, Any]] = []
             seen_ids: set[str] = set()
-            
-            if active_node:
-                merged.append(active_node)
-                seen_ids.add(active_node["id"])
-                
+
+            # 活动节点与正在连接的目标节点即使不在新列表里也必须保留。
+            for keep_id in (active_openvpn_node_id, pending_connection_node_id):
+                kept_node = current_by_id.get(str(keep_id)) if keep_id else None
+                if kept_node and kept_node["id"] not in seen_ids:
+                    merged.append(kept_node)
+                    seen_ids.add(kept_node["id"])
+
             for cand in candidates:
                 if cand["id"] not in seen_ids:
                     previous = current_by_id.get(str(cand["id"]))
                     if previous:
-                        for key in [
+                        # 探测结果与全部 IP 情报字段都要带过来：漏掉置信度 / 归属国家等字段
+                        # 会让家宽判定在每次刷新后短暂失效。
+                        for key in (
                             "probe_status",
                             "probe_message",
                             "latency_ms",
                             "probed_at",
-                            "owner",
-                            "asn",
-                            "as_name",
-                            "location",
-                            "ip_type",
-                            "quality",
-                            "is_proxy",
-                            "is_hosting",
-                            "is_mobile",
-                            "ip_type_reason",
-                        ]:
+                        ) + IP_ENRICHMENT_FIELDS:
                             if previous.get(key) not in (None, ""):
                                 cand[key] = previous.get(key)
                     merged.append(cand)
@@ -2766,6 +2971,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
             and not active_openvpn_running()
         )
         if should_fast_connect:
+            enrich_us_nodes_before_selection()
             with lock:
                 current_nodes = read_nodes()
                 fast_candidates = [
@@ -2783,9 +2989,9 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     "Main",
                     f"快速首连: 路由模式={ui_cfg.get('routing_mode', 'auto')}, 强制国家={ui_cfg.get('force_country') or '无'}, "
                     f"出口IP类型={ui_cfg.get('routing_ip_type', 'all')}；"
-                    f"过滤后候选 {len(fast_candidates)} 个(其中美国 {count_us_nodes(fast_candidates)} 个)，"
+                    f"过滤后候选 {len(fast_candidates)} 个(其中{us_counts_text(fast_candidates)})，"
                     f"本轮探测上限 {INITIAL_CONNECT_TEST_LIMIT}，实际选中 {len(fast_selected)} 个"
-                    f"(其中美国 {count_us_nodes(fast_selected)} 个): {describe_nodes(fast_selected, 15)}",
+                    f"(其中{us_counts_text(fast_selected)}): {describe_nodes(fast_selected, 15)}",
                 )
                 if fast_candidates and not count_us_nodes(fast_candidates):
                     log_selection("Main", "快速首连: 过滤后的候选中没有任何美国节点，将选择其他国家节点", "WARNING")
@@ -2794,7 +3000,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 msg = f"首次快速连接模式：优先测试 {len(fast_test_ids)} 个高优先级节点，发现可用节点后立即连接"
                 print(f"[快速首连] {msg}", flush=True)
                 log_to_json("INFO", "Main", msg)
-                set_state(is_connecting=True, last_check_message=msg)
+                set_state(last_check_message=msg)
                 fast_results = test_multiple_nodes(fast_test_ids, target_available=TARGET_VALID_NODES)
                 log_selection(
                     "Main",
@@ -2829,9 +3035,8 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     ]
                     available_candidates = apply_routing_filters(available_candidates, ui_cfg)
 
-                if available_candidates:
-                    is_connecting = False
-                    set_state(is_connecting=False, last_check_message="快速首连已找到可用节点，正在建立连接...")
+                if available_candidates and not active_openvpn_running():
+                    set_state(last_check_message="快速首连已找到可用节点，正在建立连接...")
                     auto_switch_node()
                     if active_openvpn_running():
                         valid_nodes_count = len([n for n in read_nodes() if n.get("probe_status") == "available"])
@@ -2843,7 +3048,6 @@ def maintain_valid_nodes(force: bool = False) -> str:
                             valid_nodes=valid_nodes_count,
                         )
                         return message
-                    is_connecting = True
 
         tested_results: list[dict[str, Any]] = []
         if systemic_probe_failure:
@@ -2865,17 +3069,17 @@ def maintain_valid_nodes(force: bool = False) -> str:
 
             log_selection(
                 "Main",
-                f"周期检测: 待检测 {len(to_test)} 个(其中美国 {count_us_nodes(to_test)} 个)，"
+                f"周期检测: 待检测 {len(to_test)} 个(其中{us_counts_text(to_test)})，"
                 f"探测顺序前 15 个: {describe_nodes(to_test, 15)}",
             )
             msg = f"开始对列表中所有候选节点进行周期连通性与延迟测试，待检测节点共 {len(to_test_ids)} 个"
             print(f"[周期检测] {msg}", flush=True)
             log_to_json("INFO", "Main", msg)
 
-            set_state(is_connecting=True, last_check_message="正在并发检测所有节点可用性...")
+            set_state(last_check_message="正在并发检测所有节点可用性...")
             tested_results = test_multiple_nodes(to_test_ids, target_available=TARGET_VALID_NODES)
-        is_connecting = False
-        
+
+        reconnect_needed = False
         with lock:
             merged = read_nodes()
             
@@ -2907,9 +3111,11 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     if routing_mode != "fixed_ip":
                         available_candidates = [n for n in merged if n.get("probe_status") == "available"]
                         available_candidates = apply_routing_filters(available_candidates, ui_cfg)
-                        
-                        if available_candidates:
-                            auto_switch_node()
+                        reconnect_needed = bool(available_candidates)
+
+        # 在全局锁之外发起连接：建立隧道可能耗时数十秒，期间不能阻塞状态读写与 Web 接口。
+        if reconnect_needed and not active_openvpn_running():
+            auto_switch_node()
 
         try:
             maybe_switch_to_us_node()
@@ -2926,15 +3132,18 @@ def maintain_valid_nodes(force: bool = False) -> str:
             valid_nodes=valid_nodes_count,
         )
         return message
-    except Exception as e:
-        raise e
     finally:
-        is_connecting = False
+        with lock:
+            maintenance_busy = False
         maintenance_lock.release()
 
 
 def maybe_switch_to_us_node() -> None:
-    """周期刷新后：当前连的不是美国节点、而池中有可用的美国节点时，主动切换过去。"""
+    """周期刷新后：池中出现比当前节点优先层级更高的可用节点时，主动切换过去。
+
+    层级为 美国家宽 > 其他美国节点 > 其他国家节点。例如当前连的是美国机房节点、
+    而池中有已探测可用的美国家宽节点，就会升级过去；当前已是美国家宽则保持不动。
+    """
     global last_prefer_us_switch_attempt
     if not PREFER_US_AUTO_SWITCH:
         return
@@ -2947,34 +3156,35 @@ def maybe_switch_to_us_node() -> None:
     with lock:
         nodes = read_nodes()
     active = next((n for n in nodes if n.get("active")), None)
-    if not active or us_node_priority(active) == 0:
+    if not active:
+        return
+    active_tier = us_node_priority(active)
+    if active_tier == US_RESIDENTIAL_TIER:
         return
 
-    us_candidates = [
+    better = [
         n for n in nodes
         if n.get("probe_status") == "available"
         and not n.get("active")
-        and us_node_priority(n) == 0
+        and us_node_priority(n) < active_tier
     ]
-    us_candidates = apply_routing_filters(us_candidates, ui_cfg)
-    if not us_candidates:
+    better = apply_routing_filters(better, ui_cfg)
+    if not better:
         log_selection(
             "VPN",
-            f"当前连接 {describe_node_brief(active)} 不是美国节点，但节点池中暂无可用的美国节点，保持当前连接",
+            f"当前连接 {describe_node_brief(active)} 属于【{NODE_TIER_LABELS[active_tier]}】，"
+            "节点池中暂无更高优先层级的可用节点，保持当前连接",
         )
         return
-    us_candidates.sort(key=lambda n: (
-        risk_control_index(n),
-        parse_int(n.get("latency_ms")) or 999999,
-        -parse_int(n.get("score")),
-    ))
-    best = us_candidates[0]
+    better.sort(key=selection_rank_key)
+    best = better[0]
+    best_label = NODE_TIER_LABELS[us_node_priority(best)]
 
     elapsed = time.time() - last_prefer_us_switch_attempt
     if elapsed < PREFER_US_SWITCH_COOLDOWN_SECONDS:
         log_selection(
             "VPN",
-            f"发现可用美国节点 {describe_node_brief(best)}，但距上次切换尝试仅 {int(elapsed)} 秒，"
+            f"发现可用{best_label}节点 {describe_node_brief(best)}，但距上次切换尝试仅 {int(elapsed)} 秒，"
             f"冷却 {PREFER_US_SWITCH_COOLDOWN_SECONDS} 秒内暂不切换",
         )
         return
@@ -2983,19 +3193,30 @@ def maybe_switch_to_us_node() -> None:
     previous_id = str(active.get("id") or "")
     log_selection(
         "VPN",
-        f"发现可用美国节点 {describe_node_brief(best)}(美国可用候选共 {len(us_candidates)} 个)，"
-        f"当前为非美国节点 {describe_node_brief(active)}，按最高优先规则主动切换",
+        f"发现可用{best_label}节点 {describe_node_brief(best)}(更优候选共 {len(better)} 个)，"
+        f"当前为【{NODE_TIER_LABELS[active_tier]}】节点 {describe_node_brief(active)}，按最高优先规则主动切换",
     )
     try:
         connect_node(best["id"])
-        log_selection("VPN", f"已切换到美国节点 {best['id']}")
+        log_selection("VPN", f"已切换到{best_label}节点 {best['id']}")
+    except ConnectionBusy as exc:
+        # 其他线程正在切换节点，不是目标节点的问题；下个周期再评估。
+        last_prefer_us_switch_attempt = 0.0
+        log_selection("VPN", f"暂不切换到{best_label}节点 {best['id']}: {exc}")
     except Exception as exc:
-        log_selection("VPN", f"切换到美国节点 {best['id']} 失败: {exc}", "WARNING")
+        log_selection("VPN", f"切换到{best_label}节点 {best['id']} 失败: {exc}", "WARNING")
         recover_after_manual_connect_failure(previous_id)
+
+
+def no_tunnel_retry_delay(idle_rounds: int) -> int:
+    """没有可用隧道时维护线程的重试间隔：30 秒起指数退避，封顶 NO_TUNNEL_RETRY_MAX_SECONDS。"""
+    rounds = max(1, min(int(idle_rounds), 16))
+    return int(min(NO_TUNNEL_RETRY_MAX_SECONDS, CHECK_INTERVAL_SECONDS, 30 * (2 ** (rounds - 1))))
 
 
 def collector_loop() -> None:
     global last_collector_heartbeat
+    idle_rounds = 0
     while True:
         last_collector_heartbeat = time.time()
         success = False
@@ -3011,13 +3232,38 @@ def collector_loop() -> None:
             print(f"[错误] {err_msg}", flush=True)
             log_to_json("ERROR", "Main", err_msg)
             set_state(last_check_at=time.time(), last_check_message=f"check error: {exc}")
-            
-        if not active_openvpn_running() and not success:
-            sleep_time = 30
+
+        sleep_time = CHECK_INTERVAL_SECONDS
+        if active_openvpn_running():
+            idle_rounds = 0
         else:
-            sleep_time = CHECK_INTERVAL_SECONDS
-            
-        time.sleep(sleep_time)
+            try:
+                connection_enabled = bool(load_ui_config().get("connection_enabled", True))
+            except Exception:
+                connection_enabled = True
+            if connection_enabled:
+                # 已开启连接却没有隧道：不能等满一个周期（默认 21 分钟）才重试，
+                # 否则一轮探测全部失败后会长时间断线。
+                idle_rounds += 1
+                sleep_time = no_tunnel_retry_delay(idle_rounds)
+                log_to_json(
+                    "WARNING",
+                    "Main",
+                    f"当前没有可用隧道，{sleep_time} 秒后重新拉取并检测节点(第 {idle_rounds} 次重试)",
+                )
+            else:
+                idle_rounds = 0
+                if not success:
+                    sleep_time = min(CHECK_INTERVAL_SECONDS, 30)
+
+        # 心跳在等待期间保持更新，避免退避 / 长间隔被自检误判为线程卡死。
+        wake_at = time.time() + sleep_time
+        while True:
+            remaining = wake_at - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 15))
+            last_collector_heartbeat = time.time()
 
 LOGIN_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -6618,6 +6864,19 @@ function exportLogContent() {
 </script>
 </body></html>"""
 
+PROXY_HEALTH_CHECK_URLS = (
+    "http://ip.sb",
+    "http://api.ipify.org",
+    "http://icanhazip.com",
+)
+
+def looks_like_ip_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(str(value or "").strip())
+        return True
+    except ValueError:
+        return False
+
 def check_proxy_health() -> dict[str, Any]:
     # 1. 检测代理服务端口是否在监听
     is_ipv6 = ":" in LOCAL_PROXY_HOST
@@ -6688,13 +6947,15 @@ def check_proxy_health() -> dict[str, Any]:
             try:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
                 if res.returncode == 0:
-                    lines = res.stdout.strip().splitlines()
-                    if len(lines) >= 2:
-                        ip = lines[0].strip()
-                        time_info = lines[1].strip().split()
+                    # 有的服务在 IP 后带换行、有的不带，先去掉空行再解析。
+                    lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+                    if len(lines) == 2:
+                        ip = lines[0]
+                        time_info = lines[1].split()
                         if len(time_info) == 2:
                             total_time_str, http_code = time_info
-                            if http_code == "200" and ip:
+                            # 必须真的是一个 IP：被劫持 / 拦截页面同样会返回 200，不能当作出口可用。
+                            if http_code == "200" and looks_like_ip_address(ip):
                                 latency_ms = int(float(total_time_str) * 1000)
                                 return {"ok": True, "ip": ip, "latency_ms": latency_ms}
             except Exception:
@@ -6702,12 +6963,11 @@ def check_proxy_health() -> dict[str, Any]:
         return None
 
     try:
-        result = _curl_check_ip("http://ip.sb")
-        if result:
-            return result
-        result = _curl_check_ip("http://api.ipify.org")
-        if result:
-            return result
+        # 依次尝试多个互相独立的出口 IP 服务，单个服务故障或限流不会被误判为节点失效。
+        for check_url in PROXY_HEALTH_CHECK_URLS:
+            result = _curl_check_ip(check_url)
+            if result:
+                return result
             
         # 此时外网测试失败，检测本地代理端口是否依然能连通。若仍能连通，直接抛出出口测试失败，不调用占用诊断
         port_still_listening = False
@@ -6742,7 +7002,7 @@ def check_proxy_health() -> dict[str, Any]:
             if diag:
                 return {"ok": False, "error": f"出口连接测试失败 | 本机诊断结果: {diag[1]}"}
             
-        return {"ok": False, "error": "出口连接测试失败 (ip.sb 和 api.ipify.org 均无法连通，可能是节点已失效或 VPS 防火墙限制了 UDP/TCP 出站端口)"}
+        return {"ok": False, "error": "出口连接测试失败 (ip.sb、api.ipify.org、icanhazip.com 均无法连通，可能是节点已失效或 VPS 防火墙限制了 UDP/TCP 出站端口)"}
     except Exception as e:
         return {"ok": False, "error": f"出口连接测试异常: {e}"}
 
@@ -6761,76 +7021,130 @@ def record_proxy_failure(node_id: str) -> int:
         consecutive_proxy_failures += 1
         return consecutive_proxy_failures
 
+def active_tunnel_process_exited() -> bool:
+    """记录中有活动节点，但它的 OpenVPN 进程已经退出。"""
+    return bool(active_openvpn_node_id) and not active_openvpn_running()
+
+_exit_wake_process: subprocess.Popen[str] | None = None
+
+def wait_for_next_proxy_check(interval: float) -> None:
+    """等待下一次健康检测；活动隧道的进程一旦退出就立即返回，不必等满间隔。
+
+    同一个已退出的进程只提前唤醒一次，恢复不了时退回正常间隔，避免空转。
+    """
+    global _exit_wake_process, last_checker_heartbeat
+    deadline = time.time() + interval
+    while time.time() < deadline:
+        # 等待期间持续更新心跳，间隔调大时也不会被系统自检误判为线程卡死。
+        last_checker_heartbeat = time.time()
+        process = active_openvpn_process
+        if (
+            process is not None
+            and process is not _exit_wake_process
+            and active_tunnel_process_exited()
+            and not is_connecting
+        ):
+            _exit_wake_process = process
+            return
+        time.sleep(min(1.0, max(0.05, deadline - time.time())))
+
+def run_proxy_health_check_once() -> None:
+    """执行一次代理出口健康检测，并在需要时修复路由或切换节点。"""
+    if is_connecting:
+        # 正在连接 / 切换时由连接流程自己验证出口，这里不重复检测。
+        return
+
+    checked_node_id = active_openvpn_node_id
+    if not checked_node_id and maintenance_busy:
+        # 还没有活动隧道、节点维护正在找节点：此时没有可监测的出口，
+        # 不要把“尚未连接”写成代理故障。
+        return
+    if checked_node_id and not active_openvpn_running():
+        # 进程已退出就不必再花十几秒做出口探测，直接进入恢复流程。
+        res: dict[str, Any] = {"ok": False, "error": "OpenVPN 进程已退出"}
+    else:
+        res = check_proxy_health()
+        if not res["ok"] and checked_node_id and repair_policy_routing_if_needed("tun0"):
+            # 节点没坏，只是策略路由丢了：修复后复检，通过就不计失败。
+            res = check_proxy_health()
+            if res["ok"]:
+                log_to_json("INFO", "Routing", "策略路由已自动修复，代理出口恢复正常")
+    if checked_node_id != active_openvpn_node_id or is_connecting:
+        return
+    if res["ok"]:
+        reset_proxy_failure_counter(checked_node_id)
+        set_state(
+            proxy_ok=True,
+            proxy_ip=res["ip"],
+            proxy_latency_ms=res["latency_ms"],
+            proxy_error=""
+        )
+        log_to_json("INFO", "Proxy", f"代理可用，IP: {res['ip']}, 延迟: {res['latency_ms']} ms")
+        return
+
+    error_msg = res.get("error", "未知错误")
+    failure_count = record_proxy_failure(checked_node_id) if checked_node_id else 0
+    process_exited = bool(checked_node_id) and not active_openvpn_running()
+    should_recover = process_exited or failure_count >= PROXY_FAILURE_THRESHOLD
+    if checked_node_id:
+        print(f"[警告] {LOCAL_PROXY_PORT} 端口本地代理当前不可用！原因: {error_msg}", flush=True)
+        log_to_json(
+            "WARNING",
+            "Proxy",
+            f"代理不可用 ({failure_count}/{PROXY_FAILURE_THRESHOLD}): {error_msg}",
+        )
+    display_error = error_msg
+    if checked_node_id and not process_exited and not should_recover:
+        display_error = f"{error_msg}（连续失败 {failure_count}/{PROXY_FAILURE_THRESHOLD}，暂不切换）"
+    set_state(
+        proxy_ok=False,
+        proxy_ip="-",
+        proxy_latency_ms=0,
+        proxy_error=display_error,
+    )
+
+    # A dead OpenVPN process is recovered immediately. Transient
+    # external probe failures must cross the configured threshold.
+    if not (checked_node_id and should_recover):
+        return
+    reset_proxy_failure_counter(checked_node_id)
+    ui_cfg = load_ui_config()
+    if not ui_cfg.get("connection_enabled", True):
+        return
+    routing_mode = ui_cfg.get("routing_mode", "auto")
+    if routing_mode != "fixed_ip":
+        with lock:
+            nodes = read_nodes()
+            active_node = next((n for n in nodes if n.get("id") == checked_node_id), None)
+            if active_node:
+                mark_blacklisted(active_node, f"代理连通性检测失败: {error_msg}")
+                active_node["probe_status"] = "unavailable"
+                active_node["probe_message"] = f"代理连通性检测失败: {error_msg}"
+                active_node["probed_at"] = time.time()
+                write_json(NODES_FILE, nodes)
+        auto_switch_node()
+    else:
+        print(f"[代理守护线程] 固定 IP 模式下代理不可用，正在尝试重启连接同一节点: {checked_node_id}", flush=True)
+        try:
+            connect_node(checked_node_id)
+        except Exception as e:
+            print(f"[代理守护线程] 重启固定节点失败: {e}", flush=True)
+
 def background_proxy_checker() -> None:
-    global last_checker_heartbeat, is_connecting
-    time.sleep(30)
+    global last_checker_heartbeat
+    wait_for_next_proxy_check(PROXY_CHECK_INTERVAL_SECONDS)
     while True:
         last_checker_heartbeat = time.time()
         try:
-            if is_connecting:
-                time.sleep(5)
-                continue
-
-            checked_node_id = active_openvpn_node_id
-            res = check_proxy_health()
-            if checked_node_id != active_openvpn_node_id:
-                continue
-            if res["ok"]:
-                reset_proxy_failure_counter(checked_node_id)
-                set_state(
-                    proxy_ok=True,
-                    proxy_ip=res["ip"],
-                    proxy_latency_ms=res["latency_ms"],
-                    proxy_error=""
-                )
-                log_to_json("INFO", "Proxy", f"代理可用，IP: {res['ip']}, 延迟: {res['latency_ms']} ms")
-            else:
-                error_msg = res.get("error", "未知错误")
-                failure_count = record_proxy_failure(checked_node_id) if checked_node_id else 0
-                process_exited = bool(checked_node_id) and not active_openvpn_running()
-                should_recover = process_exited or failure_count >= PROXY_FAILURE_THRESHOLD
-                if checked_node_id:
-                    print(f"[警告] {LOCAL_PROXY_PORT} 端口本地代理当前不可用！原因: {error_msg}", flush=True)
-                    log_to_json(
-                        "WARNING",
-                        "Proxy",
-                        f"代理不可用 ({failure_count}/{PROXY_FAILURE_THRESHOLD}): {error_msg}",
-                    )
-                display_error = error_msg
-                if checked_node_id and not process_exited and not should_recover:
-                    display_error = f"{error_msg}（连续失败 {failure_count}/{PROXY_FAILURE_THRESHOLD}，暂不切换）"
-                set_state(
-                    proxy_ok=False,
-                    proxy_ip="-",
-                    proxy_latency_ms=0,
-                    proxy_error=display_error,
-                )
-
-                # A dead OpenVPN process is recovered immediately. Transient
-                # external probe failures must cross the configured threshold.
-                if checked_node_id and should_recover:
-                    reset_proxy_failure_counter(checked_node_id)
-                    ui_cfg = load_ui_config()
-                    routing_mode = ui_cfg.get("routing_mode", "auto")
-                    if routing_mode != "fixed_ip":
-                        with lock:
-                            nodes = read_nodes()
-                            active_node = next((n for n in nodes if n.get("id") == checked_node_id), None)
-                            if active_node:
-                                mark_blacklisted(active_node, f"代理连通性检测失败: {error_msg}")
-                                active_node["probe_status"] = "unavailable"
-                                write_json(NODES_FILE, nodes)
-                        auto_switch_node()
-                    else:
-                        print(f"[代理守护线程] 固定 IP 模式下代理不可用，正在尝试重启连接同一节点: {checked_node_id}", flush=True)
-                        try:
-                            connect_node(checked_node_id)
-                        except Exception as e:
-                            print(f"[代理守护线程] 重启固定节点失败: {e}", flush=True)
+            run_proxy_health_check_once()
         except Exception as e:
             print(f"[错误] 代理后台检测发生异常: {e}", flush=True)
             log_to_json("ERROR", "Proxy", f"检测守护线程发生异常: {e}")
-        time.sleep(30)
+        last_checker_heartbeat = time.time()
+        if is_connecting:
+            time.sleep(5)
+        else:
+            wait_for_next_proxy_check(PROXY_CHECK_INTERVAL_SECONDS)
 
 def active_node_pinger() -> None:
     global last_pinger_heartbeat
@@ -6854,7 +7168,7 @@ def active_node_pinger() -> None:
                         set_state(active_node_latency="检测超时")
                 else:
                     set_state(active_node_latency="检测超时")
-            elif is_connecting:
+            elif is_connecting or maintenance_busy:
                 set_state(active_node_latency="测试中...")
             else:
                 set_state(active_node_latency="无活动连接")
@@ -7123,7 +7437,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        global is_connecting
+        global maintenance_busy
         effective_path = self.validate_path()
         if effective_path == "": return
         
@@ -7459,15 +7773,15 @@ class Handler(BaseHTTPRequestHandler):
                         maintenance_lock.release()
                         self.send_json({"ok": False, "error": "当前已有连接或节点维护任务正在运行，请稍后再试"}, HTTPStatus.CONFLICT)
                         return
-                    is_connecting = True
+                    maintenance_busy = True
                 try:
-                    set_state(is_connecting=True, last_check_message="正在手动测试节点可用性...")
+                    set_state(last_check_message="正在手动测试节点可用性...")
                     tested_nodes = test_multiple_nodes(node_ids)
                     self.send_json({"ok": True, "nodes": tested_nodes})
                 finally:
                     with lock:
-                        is_connecting = False
-                    set_state(is_connecting=False)
+                        maintenance_busy = False
+                    set_state()
                     maintenance_lock.release()
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -7531,15 +7845,15 @@ class Handler(BaseHTTPRequestHandler):
                         maintenance_lock.release()
                         self.send_json({"ok": False, "error": "当前已有连接或节点维护任务正在运行，请稍后再试"}, HTTPStatus.CONFLICT)
                         return
-                    is_connecting = True
+                    maintenance_busy = True
                 try:
-                    set_state(is_connecting=True, last_check_message="正在手动测试节点可用性...")
+                    set_state(last_check_message="正在手动测试节点可用性...")
                     updated_node = test_node_by_id(node_id)
                     self.send_json({"ok": True, "node": updated_node})
                 finally:
                     with lock:
-                        is_connecting = False
-                    set_state(is_connecting=False)
+                        maintenance_busy = False
+                    set_state()
                     maintenance_lock.release()
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)

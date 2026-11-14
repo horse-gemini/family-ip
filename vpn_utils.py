@@ -384,18 +384,41 @@ def load_ip_cache() -> dict[str, dict[str, Any]]:
     with ip_cache_lock:
         try:
             if IP_CACHE_FILE.exists():
-                return json.loads(IP_CACHE_FILE.read_text(encoding="utf-8"))
+                data = json.loads(IP_CACHE_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
         except Exception:
             pass
         return {}
+
+def prune_ip_cache(cache: dict[str, dict[str, Any]], now: float | None = None) -> dict[str, dict[str, Any]]:
+    """丢弃已过期或格式损坏的缓存条目，避免缓存文件随节点更替无限增长。"""
+    current = time.time() if now is None else now
+    kept: dict[str, dict[str, Any]] = {}
+    for ip, entry in cache.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            cached_at = float(entry.get("cached_at", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if current - cached_at < IP_CACHE_TTL_SECONDS:
+            kept[ip] = entry
+    return kept
 
 def save_ip_cache(cache: dict[str, dict[str, Any]]) -> None:
     with ip_cache_lock:
         try:
             DATA_DIR.mkdir(exist_ok=True, parents=True)
-            IP_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+            # 先写临时文件再原子替换：写到一半被杀掉也不会留下损坏的缓存。
+            tmp = IP_CACHE_FILE.with_suffix(IP_CACHE_FILE.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(prune_ip_cache(cache), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp.replace(IP_CACHE_FILE)
+        except Exception as exc:
+            print(f"[IP 缓存] 保存失败: {exc}", flush=True)
 
 def location_is_russia(location: Any) -> bool:
     text = str(location or "")
