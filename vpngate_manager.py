@@ -155,6 +155,16 @@ PREFER_US_AUTO_SWITCH = env_bool("PREFER_US_AUTO_SWITCH", True)
 # 两次“切换到更优美国节点”尝试之间的最短间隔，避免目标节点不稳定时来回切换。
 PREFER_US_SWITCH_COOLDOWN_SECONDS = env_int("PREFER_US_SWITCH_COOLDOWN_SECONDS", 1800, 0, 86400)
 last_prefer_us_switch_attempt = 0.0
+# VPNGate 接口每次只返回约 100 个节点且以日韩为主，美国节点往往只是偶尔出现。
+# 出现过的美国节点会记入本地“美国节点池”并持续重试；这里是它在节点源中消失、
+# 且探测不再成功之后还保留多久（小时）。设为 0 关闭该功能。
+US_NODE_RETENTION_HOURS = env_int("US_NODE_RETENTION_HOURS", 72, 0, 24 * 90)
+# 美国节点池最多保留多少个节点（按最近出现 / 最近可用排序保留）。
+US_NODE_POOL_MAX = env_int("US_NODE_POOL_MAX", 40, 1, 500)
+# 额外从 GitHub 镜像收集美国节点的最短间隔（秒）；镜像由其他网络位置抓取，
+# 看到的节点列表可能与本机不同。设为 0 关闭。
+US_MIRROR_HARVEST_INTERVAL_SECONDS = env_int("US_MIRROR_HARVEST_INTERVAL_SECONDS", 600, 0, 86400)
+last_us_mirror_harvest = 0.0
 INVALID_BACKOFF_SECONDS = env_int("INVALID_BACKOFF_SECONDS", 30 * 60, 1)
 DEPLOYMENT_MODE = os.environ.get("DEPLOYMENT_MODE", "source").strip().lower()
 if DEPLOYMENT_MODE not in {"source", "docker"}:
@@ -185,6 +195,7 @@ STATE_FILE = DATA_DIR / "state.json"
 AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 UPSTREAM_PROXY_AUTH_FILE = DATA_DIR / "upstream_proxy_auth.txt"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
+US_NODE_POOL_FILE = DATA_DIR / "us_node_pool.json"
 API_CACHE_FILE = DATA_DIR / "api_snapshot.csv"
 API_CACHE_META_FILE = DATA_DIR / "api_snapshot.meta.json"
 BUNDLED_SNAPSHOT_FILE = ROOT_DIR / "mirror" / "vpngate.csv"
@@ -1135,6 +1146,141 @@ def rows_to_candidates(
         )
     return candidates
 
+def row_is_us(row: dict[str, str]) -> bool:
+    return str(row.get("CountryShort") or "").strip().upper() == "US" and bool(row.get("IP"))
+
+
+def us_pool_entry_freshness(entry: dict[str, Any]) -> float:
+    """池内节点最近一次“在节点源中出现”或“探测可用”的时间。"""
+    try:
+        return max(float(entry.get("last_seen", 0) or 0), float(entry.get("last_ok", 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def load_us_node_pool(now: float | None = None) -> dict[str, dict[str, Any]]:
+    """读取美国节点池，丢弃格式损坏和已过保留期的条目。"""
+    current = time.time() if now is None else now
+    raw = read_json(US_NODE_POOL_FILE, {})
+    if not isinstance(raw, dict):
+        return {}
+    retention = US_NODE_RETENTION_HOURS * 3600
+    pool: dict[str, dict[str, Any]] = {}
+    for ip, entry in raw.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("row"), dict):
+            continue
+        row = {str(k): str(v or "") for k, v in entry["row"].items()}
+        if row.get("IP") != ip or not row_is_us(row) or not row.get("OpenVPN_ConfigData_Base64"):
+            continue
+        entry = dict(entry, row=row)
+        if current - us_pool_entry_freshness(entry) >= retention:
+            continue
+        pool[str(ip)] = entry
+    return pool
+
+
+def save_us_node_pool(pool: dict[str, dict[str, Any]]) -> None:
+    kept = sorted(pool.items(), key=lambda item: us_pool_entry_freshness(item[1]), reverse=True)
+    write_json(US_NODE_POOL_FILE, dict(kept[:US_NODE_POOL_MAX]))
+
+
+def remember_us_rows(rows: list[dict[str, str]], source: str, now: float | None = None) -> int:
+    """把节点源里出现的美国节点记入美国节点池，返回本次记入 / 刷新的数量。"""
+    if US_NODE_RETENTION_HOURS <= 0:
+        return 0
+    us_rows = [row for row in rows if row_is_us(row)]
+    if not us_rows:
+        return 0
+    current = time.time() if now is None else now
+    with lock:
+        pool = load_us_node_pool(current)
+        for row in us_rows:
+            ip = row["IP"]
+            previous = pool.get(ip, {})
+            pool[ip] = {
+                "row": dict(row),
+                "first_seen": previous.get("first_seen") or current,
+                "last_seen": current,
+                "last_ok": previous.get("last_ok", 0),
+                "source": source,
+            }
+        save_us_node_pool(pool)
+    return len(us_rows)
+
+
+def with_retained_us_rows(rows: list[dict[str, str]], source: str, remember: bool) -> list[dict[str, str]]:
+    """在节点源结果前面补入美国节点池里保留的美国节点。
+
+    remember=True 时先把本次结果中的美国节点记入池；本地缓存 / 内置快照是旧数据，
+    不能用来刷新“最近出现时间”，因此传 remember=False。补入的行与新抓取的行走
+    同一套配置安全校验，池文件被篡改也无法注入不安全的 OpenVPN 指令。
+    """
+    if US_NODE_RETENTION_HOURS <= 0:
+        return rows
+    try:
+        if remember:
+            remember_us_rows(rows, source)
+        with lock:
+            pool = load_us_node_pool()
+            # 池内节点只要仍探测可用（或正是当前活动节点）就一直保留。
+            nodes_by_ip = {str(n.get("ip") or ""): n for n in read_nodes()}
+            changed = False
+            for ip, entry in pool.items():
+                node = nodes_by_ip.get(ip)
+                if not node:
+                    continue
+                if node.get("active"):
+                    ok_at = time.time()
+                elif node.get("probe_status") == "available":
+                    ok_at = float(node.get("probed_at", 0) or 0)
+                else:
+                    continue
+                if ok_at > float(entry.get("last_ok", 0) or 0):
+                    entry["last_ok"] = ok_at
+                    changed = True
+            if changed:
+                save_us_node_pool(pool)
+        present_ips = {row.get("IP") for row in rows}
+        retained = [entry["row"] for ip, entry in pool.items() if ip not in present_ips]
+        retained = retained[:US_NODE_POOL_MAX]
+        fresh_us = sum(1 for row in rows if row_is_us(row))
+        if retained or fresh_us:
+            log_selection(
+                "Main",
+                f"美国节点池: 节点源 {source} 本次含美国节点 {fresh_us} 个，"
+                f"补入此前出现过的美国节点 {len(retained)} 个(池内共 {len(pool)} 个，"
+                f"消失且不可用超过 {US_NODE_RETENTION_HOURS} 小时后移除)",
+            )
+        # 放在最前面，避免被 MAX_SCAN_ROWS 截断。
+        return retained + rows
+    except Exception as exc:
+        log_to_json("WARNING", "Main", f"美国节点池处理失败，本轮仅使用节点源结果: {exc}")
+        return rows
+
+
+def harvest_us_rows_from_mirror() -> int:
+    """尽力从 GitHub 镜像额外收集美国节点，失败不影响主流程。"""
+    global last_us_mirror_harvest
+    if US_NODE_RETENTION_HOURS <= 0 or US_MIRROR_HARVEST_INTERVAL_SECONDS <= 0:
+        return 0
+    if not MIRROR_HTTPS_URL.startswith("https://"):
+        return 0
+    now = time.time()
+    if now - last_us_mirror_harvest < US_MIRROR_HARVEST_INTERVAL_SECONDS:
+        return 0
+    last_us_mirror_harvest = now
+    try:
+        mirror_text = fetch_api_text_with_deadline(MIRROR_HTTPS_URL, True)
+        mirror_rows = parse_vpngate_rows(mirror_text)
+        found = remember_us_rows(mirror_rows, "github_pages_https")
+        if found:
+            log_selection("Main", f"美国节点池: 从 GitHub 镜像额外收集到美国节点 {found} 个")
+        return found
+    except Exception as exc:
+        log_to_json("INFO", "Main", f"从 GitHub 镜像收集美国节点失败(不影响本轮): {exc}")
+        return 0
+
+
 def filter_candidates_by_discovery_countries(
     candidates: list[dict[str, Any]],
     country_codes: Any,
@@ -1163,6 +1309,9 @@ def fetch_candidates() -> list[dict[str, Any]]:
             log_to_json("INFO", "Main", msg)
             api_text = fetch_api_text_with_deadline(url, True)
             rows = parse_vpngate_rows(api_text)
+            if source_name.startswith("official"):
+                harvest_us_rows_from_mirror()
+            rows = with_retained_us_rows(rows, source_name, remember=True)
             candidates = rows_to_candidates(rows, blacklist)
             if not candidates:
                 raise ValueError("节点源通过格式校验，但没有未被屏蔽的候选节点")
@@ -1225,6 +1374,7 @@ def fetch_candidates() -> list[dict[str, Any]]:
                 continue
             api_text = read_snapshot_file(path)
             rows = parse_vpngate_rows(api_text)
+            rows = with_retained_us_rows(rows, source_name, remember=False)
             candidates = rows_to_candidates(rows, blacklist)
             if not candidates:
                 raise ValueError("本地快照没有未被屏蔽的候选节点")

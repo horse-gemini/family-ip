@@ -86,6 +86,7 @@ class ManagerLogicTests(unittest.TestCase):
             mock.patch.object(manager, "STATE_FILE", root / "state.json"),
             mock.patch.object(manager, "AUTH_FILE", root / "auth.txt"),
             mock.patch.object(manager, "BLACKLIST_FILE", root / "blacklist.json"),
+            mock.patch.object(manager, "US_NODE_POOL_FILE", root / "us_node_pool.json"),
             mock.patch.object(manager, "API_CACHE_FILE", root / "api_snapshot.csv"),
             mock.patch.object(manager, "API_CACHE_META_FILE", root / "api_snapshot.meta.json"),
             mock.patch.object(manager, "BUNDLED_SNAPSHOT_FILE", root / "bundled_snapshot.csv"),
@@ -102,6 +103,8 @@ class ManagerLogicTests(unittest.TestCase):
         manager.is_connecting = False
         manager.maintenance_busy = False
         manager.pending_connection_node_id = ""
+        # Mirror harvesting is throttled off by default; tests that cover it re-arm it.
+        manager.last_us_mirror_harvest = manager.time.time()
         manager.consecutive_proxy_failures = 0
         manager.last_proxy_failure_node_id = ""
         manager.background_refill_thread = None
@@ -1880,6 +1883,157 @@ class ManagerLogicTests(unittest.TestCase):
         manager.stop_process(StubbornProcess())
 
         self.assertEqual(["terminate", "wait:8", "kill", "wait:3"], events)
+
+
+    # ---- US node pool: keep scarce US nodes across list rotations ----
+
+    def _fetch_with_sources(self, official_rows, mirror_rows=None, mirror_error=None):
+        def fake_fetch(url, verify_ssl=True, **kwargs):
+            if url == manager.MIRROR_HTTPS_URL:
+                if mirror_error:
+                    raise mirror_error
+                return valid_snapshot_rows(mirror_rows or [("198.51.100.250", "Japan", "JP")])
+            return valid_snapshot_rows(official_rows)
+
+        with (
+            mock.patch.object(manager, "fetch_api_text_with_deadline", fake_fetch),
+            mock.patch.object(manager, "cache_api_snapshot"),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            return manager.fetch_candidates()
+
+    def test_us_node_is_retained_after_it_rotates_out_of_the_source(self) -> None:
+        first = self._fetch_with_sources(
+            [("198.51.100.10", "Japan", "JP"), ("203.0.113.50", "United States", "US")]
+        )
+        self.assertEqual({"198.51.100.10", "203.0.113.50"}, {n["ip"] for n in first})
+
+        # The next list no longer contains the US node: it must still be a candidate.
+        second = self._fetch_with_sources([("198.51.100.11", "Japan", "JP")])
+        self.assertEqual({"198.51.100.11", "203.0.113.50"}, {n["ip"] for n in second})
+        retained = next(n for n in second if n["ip"] == "203.0.113.50")
+        self.assertEqual("US", retained["country_short"])
+        self.assertTrue(manager.is_us_node(retained))
+        # No duplicates when the node shows up in the source again.
+        third = self._fetch_with_sources(
+            [("203.0.113.50", "United States", "US"), ("198.51.100.11", "Japan", "JP")]
+        )
+        self.assertEqual(1, sum(n["ip"] == "203.0.113.50" for n in third))
+
+    def test_us_pool_drops_vanished_nodes_but_keeps_working_ones(self) -> None:
+        self._fetch_with_sources(
+            [("203.0.113.50", "United States", "US"), ("203.0.113.51", "United States", "US"),
+             ("198.51.100.10", "Japan", "JP")]
+        )
+        expired = manager.time.time() - manager.US_NODE_RETENTION_HOURS * 3600 - 60
+        pool = manager.read_json(manager.US_NODE_POOL_FILE, {})
+        self.assertEqual({"203.0.113.50", "203.0.113.51"}, set(pool))
+        for entry in pool.values():
+            entry["last_seen"] = expired
+        manager.write_json(manager.US_NODE_POOL_FILE, pool)
+        # .51 has gone from the source long ago but is still in the node list and still works.
+        manager.write_json(manager.NODES_FILE, [
+            {"id": "us-working", "ip": "203.0.113.51", "country_short": "US",
+             "probe_status": "available", "probed_at": manager.time.time() - 30},
+        ])
+        # Simulate the retention bookkeeping having seen the working node before expiry.
+        pool["203.0.113.51"]["last_ok"] = manager.time.time() - 30
+        manager.write_json(manager.US_NODE_POOL_FILE, pool)
+
+        candidates = self._fetch_with_sources([("198.51.100.11", "Japan", "JP")])
+
+        self.assertEqual({"198.51.100.11", "203.0.113.51"}, {n["ip"] for n in candidates})
+        self.assertEqual({"203.0.113.51"}, set(manager.load_us_node_pool()))
+
+    def test_us_pool_records_successful_probes_for_retained_nodes(self) -> None:
+        self._fetch_with_sources([("203.0.113.50", "United States", "US")])
+        probed_at = manager.time.time() - 5
+        manager.write_json(manager.NODES_FILE, [
+            {"id": "us", "ip": "203.0.113.50", "country_short": "US",
+             "probe_status": "available", "probed_at": probed_at},
+        ])
+
+        self._fetch_with_sources([("198.51.100.11", "Japan", "JP")])
+
+        self.assertAlmostEqual(probed_at, manager.load_us_node_pool()["203.0.113.50"]["last_ok"], places=3)
+
+    def test_stale_local_snapshot_does_not_refresh_us_pool(self) -> None:
+        manager.API_CACHE_FILE.write_text(
+            valid_snapshot_rows([("203.0.113.50", "United States", "US")]), encoding="utf-8"
+        )
+        with (
+            mock.patch.object(manager, "fetch_api_text_with_deadline", side_effect=OSError("offline")),
+            mock.patch.object(manager.vpn_utils, "diagnose_api_failure", return_value=(1001, "offline")),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            candidates = manager.fetch_candidates()
+
+        self.assertEqual(["203.0.113.50"], [n["ip"] for n in candidates])
+        self.assertEqual({}, manager.load_us_node_pool())
+
+    def test_us_pool_harvests_us_nodes_from_mirror(self) -> None:
+        manager.last_us_mirror_harvest = 0.0
+        candidates = self._fetch_with_sources(
+            [("198.51.100.10", "Japan", "JP")],
+            mirror_rows=[("203.0.113.77", "United States", "US"), ("198.51.100.99", "Japan", "JP")],
+        )
+
+        # Only the US node is taken from the mirror; the official list stays authoritative otherwise.
+        self.assertEqual({"198.51.100.10", "203.0.113.77"}, {n["ip"] for n in candidates})
+        self.assertEqual("github_pages_https", manager.load_us_node_pool()["203.0.113.77"]["source"])
+
+    def test_us_pool_mirror_harvest_is_throttled_and_failure_is_harmless(self) -> None:
+        manager.last_us_mirror_harvest = 0.0
+        calls: list[str] = []
+
+        def fake_fetch(url, verify_ssl=True, **kwargs):
+            calls.append(url)
+            if url == manager.MIRROR_HTTPS_URL:
+                raise TimeoutError("mirror down")
+            return valid_snapshot_rows([("198.51.100.10", "Japan", "JP")])
+
+        with (
+            mock.patch.object(manager, "fetch_api_text_with_deadline", fake_fetch),
+            mock.patch.object(manager, "cache_api_snapshot"),
+            mock.patch.object(manager, "log_to_json"),
+        ):
+            first = manager.fetch_candidates()
+            second = manager.fetch_candidates()
+
+        self.assertEqual(["198.51.100.10"], [n["ip"] for n in first])
+        self.assertEqual(["198.51.100.10"], [n["ip"] for n in second])
+        self.assertEqual(1, calls.count(manager.MIRROR_HTTPS_URL))
+
+    def test_us_pool_cannot_inject_unsafe_openvpn_config(self) -> None:
+        unsafe = base64.b64encode(
+            b"client\ndev tun\nproto udp\nremote 203.0.113.66 1194 udp\nup /tmp/evil.sh\n"
+            b"<ca>\nCA\n</ca>\n<cert>\nCERT\n</cert>\n<key>\nKEY\n</key>\n"
+        ).decode("ascii")
+        manager.write_json(manager.US_NODE_POOL_FILE, {
+            "203.0.113.66": {
+                "row": {"IP": "203.0.113.66", "CountryShort": "US", "CountryLong": "United States",
+                        "OpenVPN_ConfigData_Base64": unsafe},
+                "last_seen": manager.time.time(),
+            },
+            "203.0.113.67": {"row": "not-a-dict", "last_seen": manager.time.time()},
+            "203.0.113.68": {
+                "row": {"IP": "203.0.113.68", "CountryShort": "JP", "OpenVPN_ConfigData_Base64": unsafe},
+                "last_seen": manager.time.time(),
+            },
+        })
+
+        candidates = self._fetch_with_sources([("198.51.100.10", "Japan", "JP")])
+
+        self.assertEqual(["198.51.100.10"], [n["ip"] for n in candidates])
+
+    def test_us_pool_is_capped_and_can_be_disabled(self) -> None:
+        rows = [(f"203.0.113.{i}", "United States", "US") for i in range(1, 7)]
+        with mock.patch.object(manager, "US_NODE_POOL_MAX", 4):
+            self._fetch_with_sources(rows)
+            self.assertEqual(4, len(manager.load_us_node_pool()))
+        with mock.patch.object(manager, "US_NODE_RETENTION_HOURS", 0):
+            candidates = self._fetch_with_sources([("198.51.100.10", "Japan", "JP")])
+        self.assertEqual(["198.51.100.10"], [n["ip"] for n in candidates])
 
 
 class ProxyServerConcurrencyTests(unittest.TestCase):
